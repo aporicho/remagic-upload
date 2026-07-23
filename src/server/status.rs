@@ -45,6 +45,24 @@ impl SharedStatus {
         state.message = "正在接收".into();
     }
 
+    pub fn activity(&self, label: &str, message: &str) {
+        let mut state = self.inner.lock().unwrap();
+        state.active = true;
+        state.filename = label.into();
+        state.received = 0;
+        state.total = 0;
+        state.message = message.into();
+    }
+
+    pub fn message(&self, message: &str) {
+        let mut state = self.inner.lock().unwrap();
+        state.active = false;
+        state.filename.clear();
+        state.received = 0;
+        state.total = 0;
+        state.message = message.into();
+    }
+
     pub fn progress(&self, received: u64) {
         self.inner.lock().unwrap().received = received;
     }

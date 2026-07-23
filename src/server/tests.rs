@@ -22,6 +22,7 @@ fn browser_pair_and_upload_round_trip() {
         credentials: credentials.clone(),
         registry: UploadRegistry::new(books.clone(), wallpapers.clone()).unwrap(),
         status: Arc::new(SharedStatus::new()),
+        peer: None,
     })
     .unwrap();
     let address = server.address();

@@ -1,8 +1,10 @@
 use crate::auth::Credentials;
 use crate::network::local_urls;
+use crate::peer::{DiscoveryService, PeerRuntime};
 use crate::server::{ServerConfig, ServerHandle, SharedStatus, StatusSnapshot};
 use crate::ui::{ScreenModel, UploadUi};
 use crate::upload::UploadRegistry;
+use crate::{catalog::Catalog, peer::DiscoveredPeer};
 use remagic_app_sdk::{
     LifecycleClient, LifecycleCommand, LifecycleStage, ManagedEnvironment, QtfbClient, Surface,
     TouchPhase, REFRESH_FAST, REFRESH_UI,
@@ -10,11 +12,12 @@ use remagic_app_sdk::{
 use std::error::Error;
 use std::io;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     let environment = ManagedEnvironment::discover("upload")?;
-    environment.require_upload_contract()?;
+    environment.require_transfer_contract()?;
     let bind = environment.listen_addr.expect("upload contract checked");
     let books_dir = environment
         .books_dir
@@ -33,6 +36,29 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let mut ui = UploadUi::load()?;
     let status = Arc::new(SharedStatus::new());
+    let device_name = if environment.device.codename == "ferrari" {
+        "Paper Pro"
+    } else {
+        "Paper Pro Move"
+    };
+    let catalog = Arc::new(Catalog::open(&environment.data_home, device_name)?);
+    let storage = crate::peer::storage::PeerStorage::new(
+        books_dir.clone(),
+        wallpapers_dir.clone(),
+        Arc::clone(&catalog),
+        &environment.data_home,
+    )?;
+    let reading = crate::peer::reading::ReadingProvider::new(
+        environment.control_socket.clone(),
+        environment.app_id.clone(),
+        &environment.data_home,
+    );
+    let peer_runtime = Arc::new(PeerRuntime::new(
+        Arc::clone(&catalog),
+        storage,
+        reading,
+        Arc::clone(&status),
+    ));
     let mut state = AppState {
         bind,
         books_dir,
@@ -41,8 +67,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         credentials: None,
         server: None,
         status,
+        data_home: environment.data_home,
+        catalog,
+        peer_runtime,
+        discovery: None,
+        peers: Vec::new(),
+        sync_worker: None,
         foreground: false,
         refresh_pressed: false,
+        sync_pressed: false,
         primary_touch: None,
         frame_sequence: 0,
         last_snapshot: None,
@@ -59,7 +92,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 LifecycleCommand::EnterBackground => {
                     state.leave_foreground();
-                    lifecycle.background_ready("文件上传", "已暂停，端口已关闭")?;
+                    lifecycle.background_ready("文件传输", "已暂停，端口已关闭")?;
                 }
                 LifecycleCommand::Shutdown { .. } => {
                     state.leave_foreground();
@@ -69,7 +102,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 LifecycleCommand::OpenPath { .. } => {
                     lifecycle.failed(
                         LifecycleStage::Foreground,
-                        "文件上传不接受设备端文件路径",
+                        "文件传输不接受设备端文件路径",
                         false,
                     )?;
                 }
@@ -85,16 +118,25 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         if ui.refresh_button.contains(event.x, event.y) {
                             state.refresh_pressed = true;
                             render(&mut state, &mut ui, &mut qtfb, Damage::Button)?;
+                        } else if ui.sync_button.contains(event.x, event.y) {
+                            state.sync_pressed = true;
+                            render(&mut state, &mut ui, &mut qtfb, Damage::Button)?;
                         }
                     }
                     TouchPhase::Release if state.primary_touch == Some(event.finger) => {
                         let activate =
                             state.refresh_pressed && ui.refresh_button.contains(event.x, event.y);
+                        let activate_sync =
+                            state.sync_pressed && ui.sync_button.contains(event.x, event.y);
                         state.primary_touch = None;
                         state.refresh_pressed = false;
+                        state.sync_pressed = false;
                         if activate {
                             state.rotate_server()?;
                             render(&mut state, &mut ui, &mut qtfb, Damage::All)?;
+                        } else if activate_sync {
+                            state.activate_sync();
+                            render(&mut state, &mut ui, &mut qtfb, Damage::Status)?;
                         } else {
                             render(&mut state, &mut ui, &mut qtfb, Damage::Button)?;
                         }
@@ -102,6 +144,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     _ => {}
                 }
             }
+            state.poll_discovery();
+            state.reap_worker();
             let snapshot = state.status.snapshot();
             if state.last_snapshot.as_ref() != Some(&snapshot)
                 && state.last_status_paint.elapsed() >= Duration::from_millis(250)
@@ -123,8 +167,15 @@ struct AppState {
     credentials: Option<Credentials>,
     server: Option<ServerHandle>,
     status: Arc<SharedStatus>,
+    data_home: std::path::PathBuf,
+    catalog: Arc<Catalog>,
+    peer_runtime: Arc<PeerRuntime>,
+    discovery: Option<DiscoveryService>,
+    peers: Vec<DiscoveredPeer>,
+    sync_worker: Option<JoinHandle<()>>,
     foreground: bool,
     refresh_pressed: bool,
+    sync_pressed: bool,
     primary_touch: Option<i32>,
     frame_sequence: u64,
     last_snapshot: Option<StatusSnapshot>,
@@ -137,7 +188,12 @@ impl AppState {
             return Ok(());
         }
         self.foreground = true;
-        self.rotate_server()
+        self.rotate_server()?;
+        match DiscoveryService::start(self.catalog.identity(), self.bind.port()) {
+            Ok(service) => self.discovery = Some(service),
+            Err(error) => self.status.message(&format!("局域网发现未启动：{error}")),
+        }
+        Ok(())
     }
 
     fn rotate_server(&mut self) -> Result<(), Box<dyn Error>> {
@@ -146,12 +202,18 @@ impl AppState {
         }
         let credentials = Credentials::generate()?;
         self.urls = local_urls(self.bind.port())?;
-        let registry = UploadRegistry::new(self.books_dir.clone(), self.wallpapers_dir.clone())?;
+        let registry = UploadRegistry::managed(
+            self.books_dir.clone(),
+            self.wallpapers_dir.clone(),
+            Arc::clone(&self.catalog),
+            &self.data_home,
+        )?;
         self.server = Some(ServerHandle::start(ServerConfig {
             bind: self.bind,
             credentials: credentials.clone(),
             registry,
             status: Arc::clone(&self.status),
+            peer: Some(Arc::clone(&self.peer_runtime)),
         })?);
         self.credentials = Some(credentials);
         Ok(())
@@ -161,9 +223,62 @@ impl AppState {
         self.foreground = false;
         self.primary_touch = None;
         self.refresh_pressed = false;
+        self.sync_pressed = false;
+        self.discovery = None;
+        self.peers.clear();
         self.credentials = None;
         if let Some(server) = self.server.take() {
             server.stop();
+        }
+        if let Some(worker) = self.sync_worker.take() {
+            let _ = worker.join();
+        }
+    }
+
+    fn poll_discovery(&mut self) {
+        let Some(discovery) = &mut self.discovery else {
+            return;
+        };
+        discovery.poll();
+        self.peers = discovery.peers();
+    }
+
+    fn activate_sync(&mut self) {
+        if self.sync_worker.is_some() {
+            self.status.message("同步正在进行");
+            return;
+        }
+        let Some(peer) = self.peers.first().cloned() else {
+            self.status.message("未发现另一台已打开“文件传输”的设备");
+            return;
+        };
+        match self.peer_runtime.is_trusted(&peer) {
+            Ok(false) => {
+                if let Err(error) = self.peer_runtime.trust(&peer) {
+                    self.status.message(&format!("配对失败：{error}"));
+                }
+            }
+            Ok(true) => {
+                let runtime = Arc::clone(&self.peer_runtime);
+                let status = Arc::clone(&self.status);
+                self.sync_worker = Some(std::thread::spawn(move || {
+                    if let Err(error) = runtime.synchronize(&peer) {
+                        status.message(&format!("同步失败：{error}"));
+                    }
+                }));
+            }
+            Err(error) => self.status.message(&format!("无法检查配对状态：{error}")),
+        }
+    }
+
+    fn reap_worker(&mut self) {
+        if self
+            .sync_worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            let worker = self.sync_worker.take().expect("checked");
+            let _ = worker.join();
         }
     }
 }
@@ -199,6 +314,13 @@ fn render(
             qr_content: &qr,
             status: &snapshot,
             refresh_pressed: state.refresh_pressed,
+            sync_pressed: state.sync_pressed,
+            peer: state.peers.first(),
+            peer_trusted: state
+                .peers
+                .first()
+                .and_then(|peer| state.peer_runtime.is_trusted(peer).ok())
+                .unwrap_or(false),
         },
     );
     state.frame_sequence = state.frame_sequence.saturating_add(1).max(1);
@@ -215,7 +337,7 @@ fn render(
             )?;
         }
         Damage::Button => {
-            let rect = ui.refresh_button;
+            let rect = ui.button_region();
             qtfb.update_partial(
                 rect.x as i32,
                 rect.y as i32,

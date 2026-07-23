@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::peer::DiscoveredPeer;
 use crate::server::StatusSnapshot;
 
 const UI_FONT: &str = "/home/root/apps/remagic/fonts/UIFont.ttf";
@@ -30,6 +31,7 @@ impl Rect {
 pub struct UploadUi {
     font: FontArc,
     pub refresh_button: Rect,
+    pub sync_button: Rect,
     pub status_region: Rect,
 }
 
@@ -39,6 +41,9 @@ pub struct ScreenModel<'a> {
     pub qr_content: &'a str,
     pub status: &'a StatusSnapshot,
     pub refresh_pressed: bool,
+    pub sync_pressed: bool,
+    pub peer: Option<&'a DiscoveredPeer>,
+    pub peer_trusted: bool,
 }
 
 impl UploadUi {
@@ -52,6 +57,12 @@ impl UploadUi {
         Ok(Self {
             font,
             refresh_button: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            sync_button: Rect {
                 x: 0,
                 y: 0,
                 width: 0,
@@ -74,7 +85,7 @@ impl UploadUi {
         surface.clear(WHITE);
         self.text(
             surface,
-            "文件上传",
+            "文件传输",
             margin as f32,
             margin as f32,
             54.0 * unit,
@@ -82,7 +93,7 @@ impl UploadUi {
         );
         self.text(
             surface,
-            "浏览器打开地址，扫码或输入配对码",
+            "浏览器上传，或与另一台 ReMagic 设备同步",
             margin as f32,
             margin as f32 + 75.0 * unit,
             25.0 * unit,
@@ -205,11 +216,33 @@ impl UploadUi {
             );
         }
 
+        let peer_text = match model.peer {
+            Some(peer) if model.peer_trusted => format!("同步设备：{}　已配对", peer.name),
+            Some(peer) => format!("同步设备：{}　配对码 {}", peer.name, peer.pairing_code),
+            None => "同步设备：等待局域网发现".to_owned(),
+        };
+        self.text_fit(
+            surface,
+            &peer_text,
+            (margin as f32, bar_y as f32 + 66.0 * unit),
+            width.saturating_sub(margin * 2) as f32,
+            24.0 * unit,
+            GRAY,
+        );
+
         let button_height = (92.0 * unit) as usize;
+        let gap = (18.0 * unit) as usize;
+        let available = width.saturating_sub(margin * 2 + gap);
         self.refresh_button = Rect {
             x: margin,
             y: height.saturating_sub(margin + button_height),
-            width: width.saturating_sub(margin * 2),
+            width: available / 2,
+            height: button_height,
+        };
+        self.sync_button = Rect {
+            x: self.refresh_button.x + self.refresh_button.width + gap,
+            y: self.refresh_button.y,
+            width: available - self.refresh_button.width,
             height: button_height,
         };
         self.status_region = Rect {
@@ -244,11 +277,51 @@ impl UploadUi {
         );
         self.text_centered(
             surface,
-            "刷新地址与配对码",
+            "刷新上传码",
             self.refresh_button,
             30.0 * unit,
             foreground,
         );
+        let (background, foreground) = if model.sync_pressed {
+            (BLACK, WHITE)
+        } else {
+            (WHITE, BLACK)
+        };
+        surface.fill_rect(
+            self.sync_button.x,
+            self.sync_button.y,
+            self.sync_button.width,
+            self.sync_button.height,
+            background,
+        );
+        surface.stroke_rect(
+            self.sync_button.x,
+            self.sync_button.y,
+            self.sync_button.width,
+            self.sync_button.height,
+            (3.0 * unit).max(2.0) as usize,
+            foreground,
+        );
+        self.text_centered(
+            surface,
+            if model.peer_trusted {
+                "立即同步"
+            } else {
+                "确认配对"
+            },
+            self.sync_button,
+            30.0 * unit,
+            foreground,
+        );
+    }
+
+    pub fn button_region(&self) -> Rect {
+        Rect {
+            x: self.refresh_button.x,
+            y: self.refresh_button.y,
+            width: self.sync_button.x + self.sync_button.width - self.refresh_button.x,
+            height: self.refresh_button.height,
+        }
     }
 
     fn qr(&self, surface: &mut Surface<'_>, content: &str, x: usize, y: usize, size: usize) {

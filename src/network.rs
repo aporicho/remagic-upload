@@ -1,9 +1,24 @@
 use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+
+pub fn local_addresses() -> io::Result<Vec<IpAddr>> {
+    Ok(interface_addresses()?.into_iter().map(IpAddr::V4).collect())
+}
 
 pub fn local_urls(port: u16) -> io::Result<Vec<String>> {
+    let addresses = interface_addresses()?;
+    let usb = Ipv4Addr::new(10, 11, 99, 1);
+    let mut ordered = addresses.into_iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|address| (*address != usb, *address));
+    Ok(ordered
+        .into_iter()
+        .map(|address| format!("http://{}", SocketAddrV4::new(address, port)))
+        .collect())
+}
+
+fn interface_addresses() -> io::Result<BTreeSet<Ipv4Addr>> {
     let mut addresses = BTreeSet::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
@@ -27,14 +42,7 @@ pub fn local_urls(port: u16) -> io::Result<Vec<String>> {
         current = unsafe { (*current).ifa_next };
     }
     unsafe { libc::freeifaddrs(list) };
-
-    let usb = Ipv4Addr::new(10, 11, 99, 1);
-    let mut ordered = addresses.into_iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|address| (*address != usb, *address));
-    Ok(ordered
-        .into_iter()
-        .map(|address| format!("http://{}", SocketAddrV4::new(address, port)))
-        .collect())
+    Ok(addresses)
 }
 
 #[cfg(test)]

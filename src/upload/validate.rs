@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-pub(super) fn validate_book(path: &Path, filename: &str) -> Result<(), UploadError> {
+pub(crate) fn validate_book(path: &Path, filename: &str) -> Result<(), UploadError> {
     let extension = Path::new(filename)
         .extension()
         .and_then(|value| value.to_str())
@@ -48,7 +48,7 @@ pub(super) fn validate_book(path: &Path, filename: &str) -> Result<(), UploadErr
     }
 }
 
-pub(super) fn validate_png(path: &Path) -> Result<(), UploadError> {
+pub(crate) fn validate_png(path: &Path) -> Result<(), UploadError> {
     let file = File::open(path)?;
     let decoder = png::Decoder::new_with_limits(
         BufReader::new(file),

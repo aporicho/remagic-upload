@@ -1,7 +1,8 @@
 mod naming;
-mod validate;
+pub(crate) mod validate;
 
 use crate::server::SharedStatus;
+use crate::{catalog::Catalog, trash::Trash};
 use naming::{collision_candidate, sanitize_filename};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -35,14 +36,24 @@ impl UploadKind {
             Self::Wallpaper => WALLPAPER_MAX_BYTES,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Book => "book",
+            Self::Wallpaper => "wallpaper",
+        }
+    }
 }
 
 pub struct UploadRegistry {
     books_dir: PathBuf,
     wallpapers_dir: PathBuf,
+    catalog: Option<Arc<Catalog>>,
+    trash: Option<Trash>,
 }
 
 impl UploadRegistry {
+    #[cfg(test)]
     pub fn new(books_dir: PathBuf, wallpapers_dir: PathBuf) -> Result<Self, UploadError> {
         validate_destination(&books_dir)?;
         validate_destination(&wallpapers_dir)?;
@@ -51,6 +62,26 @@ impl UploadRegistry {
         Ok(Self {
             books_dir,
             wallpapers_dir,
+            catalog: None,
+            trash: None,
+        })
+    }
+
+    pub fn managed(
+        books_dir: PathBuf,
+        wallpapers_dir: PathBuf,
+        catalog: Arc<Catalog>,
+        data_home: &Path,
+    ) -> Result<Self, UploadError> {
+        validate_destination(&books_dir)?;
+        validate_destination(&wallpapers_dir)?;
+        cleanup_parts(&books_dir)?;
+        cleanup_parts(&wallpapers_dir)?;
+        Ok(Self {
+            books_dir,
+            wallpapers_dir,
+            catalog: Some(catalog),
+            trash: Some(Trash::new(data_home)?),
         })
     }
 
@@ -88,13 +119,45 @@ impl UploadRegistry {
                 UploadKind::Book => validate_book(&temporary, &filename)?,
                 UploadKind::Wallpaper => validate_png(&temporary)?,
             }
-            publish_no_overwrite(&temporary, destination, &filename)
+            if let (Some(catalog), Some(trash)) = (&self.catalog, &self.trash) {
+                publish_replacing(&temporary, destination, &filename, kind, catalog, trash)
+            } else {
+                publish_no_overwrite(&temporary, destination, &filename)
+            }
         });
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
         result
     }
+}
+
+fn publish_replacing(
+    temporary: &Path,
+    destination: &Path,
+    filename: &str,
+    kind: UploadKind,
+    catalog: &Catalog,
+    trash: &Trash,
+) -> Result<PathBuf, UploadError> {
+    let final_path = destination.join(filename);
+    let previous = trash.move_existing(kind.as_str(), Path::new(filename), &final_path)?;
+    if let Err(error) = fs::rename(temporary, &final_path) {
+        if let Some(previous) = previous {
+            let _ = trash.restore(&previous, &final_path);
+        }
+        return Err(error.into());
+    }
+    if let Err(error) = catalog.record_local_file(kind.as_str(), destination, &final_path) {
+        let _ = fs::remove_file(&final_path);
+        if let Some(previous) = previous {
+            let _ = trash.restore(&previous, &final_path);
+        }
+        return Err(error.into());
+    }
+    File::open(destination)?.sync_all()?;
+    let _ = trash.prune_expired();
+    Ok(final_path)
 }
 
 fn receive_to_temp(
@@ -207,6 +270,10 @@ pub enum UploadError {
     Io(#[from] io::Error),
     #[error("PNG 解码失败：{0}")]
     Png(String),
+    #[error(transparent)]
+    Catalog(#[from] crate::catalog::CatalogError),
+    #[error(transparent)]
+    Trash(#[from] crate::trash::TrashError),
 }
 
 #[cfg(test)]

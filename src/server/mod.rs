@@ -4,6 +4,7 @@ mod status;
 mod tests;
 
 use crate::auth::Credentials;
+use crate::peer::{PeerRuntime, MAGIC as PEER_MAGIC};
 use crate::upload::{UploadKind, UploadRegistry};
 use http::{read_request, response, HttpRequest};
 use std::collections::HashMap;
@@ -27,6 +28,7 @@ pub struct ServerConfig {
     pub credentials: Credentials,
     pub registry: UploadRegistry,
     pub status: Arc<SharedStatus>,
+    pub peer: Option<Arc<PeerRuntime>>,
 }
 
 pub struct ServerHandle {
@@ -48,6 +50,7 @@ impl ServerHandle {
             credentials: config.credentials,
             registry: config.registry,
             status: config.status,
+            peer: config.peer,
             active_upload: AtomicBool::new(false),
             active_connections: AtomicUsize::new(0),
             attempts: Mutex::new(HashMap::new()),
@@ -89,6 +92,7 @@ struct RuntimeConfig {
     credentials: Credentials,
     registry: UploadRegistry,
     status: Arc<SharedStatus>,
+    peer: Option<Arc<PeerRuntime>>,
     active_upload: AtomicBool,
     active_connections: AtomicUsize,
     attempts: Mutex<HashMap<IpAddr, AttemptWindow>>,
@@ -159,6 +163,16 @@ fn handle_connection(
 ) -> Result<(), ServerError> {
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut marker = [0_u8; 4];
+    if stream.peek(&mut marker)? == marker.len() && &marker == PEER_MAGIC {
+        let Some(peer) = &config.peer else {
+            return Ok(());
+        };
+        if let Err(error) = peer.accept(stream) {
+            config.status.message(&format!("设备同步失败：{error}"));
+        }
+        return Ok(());
+    }
     let request = match read_request(&mut stream, stop) {
         Ok(request) => request,
         Err(error) => {
