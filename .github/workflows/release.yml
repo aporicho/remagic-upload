@@ -22,12 +22,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out File Transfer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           path: remagic-upload
       - name: Check out pinned ReMagic application SDK
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: aporicho/remagic
           ref: 1c97b295cd09bfa47732317651290384042e301c
@@ -39,7 +39,7 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
       - name: Restore reMarkable SDK
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.SDK_DIR }}
           key: remarkable-sdk-chiappa-3.27.0.97-${{ env.SDK_SHA256 }}
