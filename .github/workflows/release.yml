@@ -1,0 +1,65 @@
+name: Release File Transfer
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  SDK_URL: https://storage.googleapis.com/remarkable-codex-toolchain/3.27.0.97/chiappa/remarkable-production-image-5.7.119-chiappa-public-x86_64-toolchain.sh
+  SDK_SHA256: f22794bc6bb6729e648a7404a561e870d537818bd62a2f9950522f0cf15b4130
+  SDK_DIR: /home/runner/remagic-sdk-chiappa-3.27
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Restore reMarkable SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SDK_DIR }}
+          key: remarkable-sdk-chiappa-3.27.0.97-${{ env.SDK_SHA256 }}
+      - name: Install verified reMarkable SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 5 --output "$RUNNER_TEMP/remarkable-sdk.sh" "$SDK_URL"
+          echo "$SDK_SHA256  $RUNNER_TEMP/remarkable-sdk.sh" | sha256sum -c -
+          chmod 0755 "$RUNNER_TEMP/remarkable-sdk.sh"
+          "$RUNNER_TEMP/remarkable-sdk.sh" -y -d "$SDK_DIR"
+      - name: Check and build package
+        env:
+          RM_SDK: ${{ env.SDK_DIR }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version"
+          scripts/check.sh
+          scripts/build-device.sh
+          scripts/make-package.sh
+      - name: Publish package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          asset="dist/remagic-upload-$version-universal_aarch64.tar.gz"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "文件传输 $version" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
