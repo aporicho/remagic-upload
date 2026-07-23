@@ -52,9 +52,9 @@ mod tests {
         assert_eq!(
             format!(
                 "http://{}",
-                std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(10, 11, 99, 1), 8787)
+                std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(10, 11, 99, 1), 8788)
             ),
-            "http://10.11.99.1:8787"
+            "http://10.11.99.1:8788"
         );
     }
 }

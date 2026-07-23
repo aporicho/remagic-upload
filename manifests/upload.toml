@@ -3,7 +3,7 @@ id = "upload"
 name = "文件传输"
 kind = "user"
 description = "浏览器上传，并在 Paper Pro 与 Paper Pro Move 间同步书籍、壁纸和阅读进度"
-version = "0.2.0"
+version = "0.2.1"
 package = "remagic-upload"
 supported_devices = ["paper_pro", "paper_pro_move"]
 supported_os = []
@@ -60,4 +60,4 @@ required = false
 
 [runtime.network]
 mode = "lan_peer"
-listen_port = 8787
+listen_port = 8788
