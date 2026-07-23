@@ -1,0 +1,118 @@
+:root {
+  color-scheme: light;
+  --ink: #171717;
+  --paper: #f7f5ef;
+  --line: #b9b5aa;
+  --soft: #e9e5da;
+  --bad: #8b1f1f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, "Noto Sans CJK SC", sans-serif;
+}
+
+main {
+  width: min(760px, calc(100% - 28px));
+  margin: 24px auto;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 2px solid var(--ink);
+  margin-bottom: 22px;
+}
+
+h1 { font-size: 2rem; margin: .25em 0; }
+h2 { margin-top: 0; }
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  padding: 20px;
+  box-shadow: 0 3px 16px #0000000d;
+}
+
+form { display: flex; gap: 10px; }
+input, button, label { font: inherit; }
+
+#pin {
+  min-width: 0;
+  flex: 1;
+  font-size: 1.5rem;
+  letter-spacing: .3em;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+button, label {
+  border: 1px solid var(--ink);
+  border-radius: 9px;
+  padding: 12px 18px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+button:active, label:active, .kind.active { background: var(--ink); color: #fff; }
+.error { color: var(--bad); }
+nav { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.drop {
+  text-align: center;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  border-style: dashed;
+}
+
+.drop.over { background: var(--soft); }
+.drop strong { font-size: 1.5rem; }
+.drop input { display: none; }
+
+#queue {
+  list-style: none;
+  margin: 14px 0;
+  padding: 8px 18px;
+  min-height: 60px;
+}
+
+#queue:empty::after {
+  content: "队列为空";
+  display: block;
+  color: #777;
+  padding: 12px 0;
+}
+
+.item { padding: 12px 0; border-bottom: 1px solid var(--soft); }
+.item:last-child { border: 0; }
+.row { display: flex; align-items: center; gap: 12px; }
+.row span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.row small { white-space: nowrap; }
+
+.cancel {
+  padding: 4px 9px;
+  border-color: var(--line);
+  font-size: .85rem;
+}
+
+.progress { height: 5px; background: var(--soft); margin-top: 8px; }
+.progress i { display: block; height: 100%; background: var(--ink); width: 0; }
+.hint { color: #666; line-height: 1.6; font-size: .9rem; }
+
+@media (max-width: 500px) {
+  main { margin-top: 12px; }
+  .card { padding: 15px; }
+  form { flex-direction: column; }
+}

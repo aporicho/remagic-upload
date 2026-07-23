@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>文件上传</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <header><h1>文件上传</h1><span id="connection">等待配对</span></header>
+    <section id="pairing" class="card">
+      <h2>连接设备</h2>
+      <p>输入设备屏幕上的六位配对码。</p>
+      <form id="pair-form"><input id="pin" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000"><button>连接</button></form>
+      <p id="pair-error" class="error"></p>
+    </section>
+    <section id="workspace" hidden>
+      <nav><button class="kind active" data-kind="book">书籍</button><button class="kind" data-kind="wallpaper">壁纸</button></nav>
+      <div id="drop" class="drop card" tabindex="0">
+        <strong id="drop-title">把书拖到这里</strong>
+        <span>也可以粘贴文件，或从设备中选择</span>
+        <label>选择文件<input id="files" type="file" multiple accept=".epub,.pdf,.djvu,.djv,.mobi,.azw3,.fb2,.cbz,.cbr,.txt"></label>
+      </div>
+      <ul id="queue" class="card"></ul>
+      <p class="hint">书籍：EPUB、PDF、DJVU、MOBI、AZW3、FB2、CBZ、CBR、TXT。壁纸会在本机转换为 PNG 后上传。</p>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

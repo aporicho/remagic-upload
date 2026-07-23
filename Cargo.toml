@@ -1,0 +1,23 @@
+[package]
+name = "remagic-upload"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/aporicho/remagic-upload"
+description = "Foreground-only book and wallpaper upload app for ReMagic"
+
+[dependencies]
+ab_glyph = "0.2"
+libc = "0.2"
+png = "0.18"
+qrcode = { version = "0.14", default-features = false }
+remagic-app-sdk = { path = "../remagic/crates/remagic-app-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
