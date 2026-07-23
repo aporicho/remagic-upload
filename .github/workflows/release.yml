@@ -21,9 +21,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out File Transfer
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: remagic-upload
+      - name: Check out pinned ReMagic application SDK
+        uses: actions/checkout@v4
+        with:
+          repository: aporicho/remagic
+          ref: 1c97b295cd09bfa47732317651290384042e301c
+          path: remagic
       - name: Install toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -45,6 +53,7 @@ jobs:
       - name: Check and build package
         env:
           RM_SDK: ${{ env.SDK_DIR }}
+        working-directory: remagic-upload
         run: |
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
           test "$GITHUB_REF_NAME" = "v$version"
@@ -54,6 +63,7 @@ jobs:
       - name: Publish package
         env:
           GH_TOKEN: ${{ github.token }}
+        working-directory: remagic-upload
         run: |
           version=${GITHUB_REF_NAME#v}
           asset="dist/remagic-upload-$version-universal_aarch64.tar.gz"

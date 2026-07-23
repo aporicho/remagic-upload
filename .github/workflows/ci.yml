@@ -13,8 +13,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out File Transfer
+        uses: actions/checkout@v4
+        with:
+          path: remagic-upload
+      - name: Check out pinned ReMagic application SDK
+        uses: actions/checkout@v4
+        with:
+          repository: aporicho/remagic
+          ref: 1c97b295cd09bfa47732317651290384042e301c
+          path: remagic
       - run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
       - run: scripts/check.sh
+        working-directory: remagic-upload
