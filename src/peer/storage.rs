@@ -42,9 +42,9 @@ impl PeerStorage {
     }
 
     pub fn scan(&self) -> Result<Vec<ObjectRecord>, StorageError> {
-        self.catalog.scan("book", &self.books)?;
-        self.catalog.scan("wallpaper", &self.wallpapers)?;
-        Ok(self.catalog.records()?)
+        let mut records = self.catalog.scan("book", &self.books)?;
+        records.extend(self.catalog.scan("wallpaper", &self.wallpapers)?);
+        Ok(records)
     }
 
     pub fn open_local(&self, record: &ObjectRecord) -> Result<File, StorageError> {

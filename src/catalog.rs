@@ -142,6 +142,7 @@ impl Catalog {
         validate_kind(kind)?;
         let mut files = Vec::new();
         collect_files(root, root, &mut files)?;
+        files.retain(|(relative, _, _)| supported_object_path(kind, relative));
         let mut connection = self.connection.lock().map_err(|_| CatalogError::Poisoned)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut seen = std::collections::BTreeSet::new();
@@ -181,7 +182,7 @@ impl Catalog {
 
         let live_paths = list_kind(&transaction, kind)?
             .into_iter()
-            .filter(|record| !record.deleted)
+            .filter(|record| !record.deleted && supported_object_path(kind, &record.path))
             .map(|record| record.path)
             .collect::<Vec<_>>();
         for path in live_paths {
@@ -204,7 +205,10 @@ impl Catalog {
                 0,
             )?;
         }
-        let records = list_kind(&transaction, kind)?;
+        let records = list_kind(&transaction, kind)?
+            .into_iter()
+            .filter(|record| supported_object_path(kind, &record.path))
+            .collect();
         transaction.commit()?;
         Ok(records)
     }
@@ -237,18 +241,6 @@ impl Catalog {
         let connection = self.connection.lock().map_err(|_| CatalogError::Poisoned)?;
         upsert_object(&connection, record, mtime_ms)?;
         Ok(())
-    }
-
-    pub fn records(&self) -> Result<Vec<ObjectRecord>, CatalogError> {
-        let connection = self.connection.lock().map_err(|_| CatalogError::Poisoned)?;
-        let mut statement = connection.prepare(
-            "SELECT kind,path,size,hash,wall_time_ms,counter,origin,deleted
-             FROM objects ORDER BY kind,path",
-        )?;
-        let records = statement
-            .query_map([], row_object)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(records)
     }
 
     pub fn find(&self, kind: &str, path: &str) -> Result<Option<ObjectRecord>, CatalogError> {
@@ -450,6 +442,22 @@ fn normalized_relative(root: &Path, path: &Path) -> Result<String, CatalogError>
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| CatalogError::UnsafeFile(path.to_path_buf()))
+}
+
+fn supported_object_path(kind: &str, path: &str) -> bool {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match kind {
+        "book" => matches!(
+            extension.as_str(),
+            "pdf" | "djvu" | "djv" | "mobi" | "azw3" | "fb2" | "epub" | "cbz" | "cbr" | "txt"
+        ),
+        "wallpaper" => extension == "png",
+        _ => false,
+    }
 }
 
 fn hash_file(path: &Path) -> Result<String, io::Error> {

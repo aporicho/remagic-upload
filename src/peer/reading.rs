@@ -133,14 +133,18 @@ fn validate_payload(bytes: &[u8]) -> Result<Vec<Value>, ReadingError> {
     if value.get("schema").and_then(Value::as_u64) != Some(1) {
         return Err(ReadingError::Invalid);
     }
-    let books = value
-        .get("books")
-        .and_then(Value::as_array)
-        .ok_or(ReadingError::Invalid)?;
+    let books = match value.get("books") {
+        Some(Value::Array(books)) => books.clone(),
+        // KOReader's LuaJSON historically encoded an empty Lua table as {}.
+        // Accept only that empty legacy shape and immediately normalize it;
+        // non-empty objects remain invalid rather than becoming ambiguous.
+        Some(Value::Object(books)) if books.is_empty() => Vec::new(),
+        _ => return Err(ReadingError::Invalid),
+    };
     if books.len() > 100_000 {
         return Err(ReadingError::Invalid);
     }
-    Ok(books.clone())
+    Ok(books)
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, ReadingError> {
@@ -187,5 +191,13 @@ mod tests {
         let right = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"bookmarks":[{"page":2}]}]}"#;
         let merged: Value = serde_json::from_slice(&merge(left, right).unwrap()).unwrap();
         assert_eq!(merged["books"][0]["bookmarks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn legacy_empty_object_is_normalized_to_an_empty_array() {
+        let legacy = br#"{"schema":1,"books":{}}"#;
+        let current = br#"{"schema":1,"books":[]}"#;
+        let merged: Value = serde_json::from_slice(&merge(legacy, current).unwrap()).unwrap();
+        assert_eq!(merged["books"], serde_json::json!([]));
     }
 }

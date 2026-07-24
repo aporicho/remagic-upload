@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-app-sdk"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "remagic-core",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64",
  "libc",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-device"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "remagic-core",
  "serde",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-upload"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "ab_glyph",
  "bincode",

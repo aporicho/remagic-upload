@@ -191,7 +191,10 @@ impl AppState {
         self.rotate_server()?;
         match DiscoveryService::start(self.catalog.identity(), self.bind.port()) {
             Ok(service) => self.discovery = Some(service),
-            Err(error) => self.status.message(&format!("局域网发现未启动：{error}")),
+            Err(error) => {
+                eprintln!("remagic-upload: LAN discovery failed: {error}");
+                self.status.message(&format!("局域网发现未启动：{error}"));
+            }
         }
         Ok(())
     }
@@ -263,6 +266,7 @@ impl AppState {
                 let status = Arc::clone(&self.status);
                 self.sync_worker = Some(std::thread::spawn(move || {
                     if let Err(error) = runtime.synchronize(&peer) {
+                        eprintln!("remagic-upload: peer sync failed: {error}");
                         status.message(&format!("同步失败：{error}"));
                     }
                 }));

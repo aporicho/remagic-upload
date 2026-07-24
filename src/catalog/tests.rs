@@ -54,3 +54,20 @@ fn identity_and_trusted_peer_survive_reopen() {
     assert!(catalog.trusted_peer("0123456789abcdef").unwrap().is_some());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn scan_excludes_koreader_sidecars_and_unsupported_files() {
+    let root = fixture();
+    let data = root.join("data");
+    let books = root.join("books");
+    let sidecar = books.join("论语.sdr");
+    fs::create_dir_all(&sidecar).unwrap();
+    fs::write(books.join("论语.epub"), b"book").unwrap();
+    fs::write(sidecar.join("metadata.epub.lua"), b"return {}").unwrap();
+    fs::write(books.join("cover.png"), b"not a book").unwrap();
+    let catalog = Catalog::open(&data, "Paper Pro").unwrap();
+    let records = catalog.scan("book", &books).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].path, "论语.epub");
+    fs::remove_dir_all(root).unwrap();
+}
