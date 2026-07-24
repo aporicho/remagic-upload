@@ -137,7 +137,13 @@ pub fn pairing_code(first: &[u8], second: &[u8]) -> String {
 }
 
 fn usable(address: IpAddr) -> bool {
-    !address.is_unspecified() && !address.is_loopback() && !address.is_multicast()
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_multicast()
+        // Every reMarkable exposes the same USB gadget address. Advertising it
+        // for peer sync can make a tablet connect back to itself instead of the
+        // discovered peer, so device-to-device traffic must use the LAN address.
+        && address != IpAddr::V4("10.11.99.1".parse().expect("fixed USB address"))
 }
 
 #[derive(Debug, Error)]
@@ -159,5 +165,11 @@ mod tests {
             pairing_code(&[2; 32], &[1; 32])
         );
         assert_eq!(pairing_code(&[1; 32], &[2; 32]).len(), 6);
+    }
+
+    #[test]
+    fn peer_discovery_rejects_the_shared_usb_gadget_address() {
+        assert!(!usable("10.11.99.1".parse().unwrap()));
+        assert!(usable("172.16.20.41".parse().unwrap()));
     }
 }
