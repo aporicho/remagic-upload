@@ -54,6 +54,15 @@ impl SharedStatus {
         state.message = message.into();
     }
 
+    pub fn transfer(&self, label: &str, total: u64, message: &str) {
+        let mut state = self.inner.lock().unwrap();
+        state.active = true;
+        state.filename = label.into();
+        state.received = 0;
+        state.total = total;
+        state.message = message.into();
+    }
+
     pub fn message(&self, message: &str) {
         let mut state = self.inner.lock().unwrap();
         state.active = false;

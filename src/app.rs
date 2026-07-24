@@ -144,10 +144,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     _ => {}
                 }
             }
-            state.poll_discovery();
+            let peers_changed = state.poll_discovery();
             state.reap_worker();
             let snapshot = state.status.snapshot();
-            if state.last_snapshot.as_ref() != Some(&snapshot)
+            if (peers_changed || state.last_snapshot.as_ref() != Some(&snapshot))
                 && state.last_status_paint.elapsed() >= Duration::from_millis(250)
             {
                 state.last_snapshot = Some(snapshot);
@@ -238,12 +238,17 @@ impl AppState {
         }
     }
 
-    fn poll_discovery(&mut self) {
+    fn poll_discovery(&mut self) -> bool {
         let Some(discovery) = &mut self.discovery else {
-            return;
+            return false;
         };
         discovery.poll();
-        self.peers = discovery.peers();
+        let peers = discovery.peers();
+        if peers == self.peers {
+            return false;
+        }
+        self.peers = peers;
+        true
     }
 
     fn activate_sync(&mut self) {
@@ -267,7 +272,7 @@ impl AppState {
                 self.sync_worker = Some(std::thread::spawn(move || {
                     if let Err(error) = runtime.synchronize(&peer) {
                         eprintln!("remagic-upload: peer sync failed: {error}");
-                        status.message(&format!("同步失败：{error}"));
+                        status.message(&format!("同步失败：{}", error.user_message()));
                     }
                 }));
             }

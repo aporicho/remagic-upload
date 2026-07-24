@@ -118,23 +118,56 @@ function render() {
   });
 }
 
+const WALLPAPER_MAX_EDGE = 4096;
+const WALLPAPER_MAX_BYTES = 32 * 1024 * 1024;
+
 async function wallpaperPng(file) {
-  if (file.type === "image/png") return file;
   const bitmap = await createImageBitmap(file);
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  canvas.getContext("2d").drawImage(bitmap, 0, 0);
-  const blob = await new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (value) => (value ? resolve(value) : reject(new Error("图片转换失败"))),
-      "image/png",
+  try {
+    const initialScale = Math.min(
+      1,
+      WALLPAPER_MAX_EDGE / Math.max(bitmap.width, bitmap.height),
     );
-  });
-  bitmap.close();
-  return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".png", {
-    type: "image/png",
-  });
+    let width = Math.max(1, Math.round(bitmap.width * initialScale));
+    let height = Math.max(1, Math.round(bitmap.height * initialScale));
+
+    if (
+      file.type === "image/png" &&
+      initialScale === 1 &&
+      file.size <= WALLPAPER_MAX_BYTES
+    ) {
+      return file;
+    }
+
+    let blob;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+      blob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (value) => (value ? resolve(value) : reject(new Error("图片转换失败"))),
+          "image/png",
+        );
+      });
+      if (blob.size <= WALLPAPER_MAX_BYTES) break;
+      const shrink = Math.min(
+        0.9,
+        Math.sqrt(WALLPAPER_MAX_BYTES / blob.size) * 0.95,
+      );
+      width = Math.max(1, Math.floor(width * shrink));
+      height = Math.max(1, Math.floor(height * shrink));
+    }
+    if (!blob || blob.size > WALLPAPER_MAX_BYTES) {
+      throw new Error("图片过大，自动缩放后仍无法上传");
+    }
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".png", {
+      type: "image/png",
+    });
+  } finally {
+    bitmap.close();
+  }
 }
 
 async function run() {

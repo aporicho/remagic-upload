@@ -17,8 +17,6 @@ mod validate;
 use identity::load_or_create_identity;
 use validate::{create_private_directory, validate_kind, validate_peer, validate_record};
 
-pub const SYNC_SCHEMA: u32 = 1;
-
 #[derive(Clone, Debug)]
 pub struct DeviceIdentity {
     pub id: String,

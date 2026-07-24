@@ -170,7 +170,9 @@ fn handle_connection(
         };
         if let Err(error) = peer.accept(stream) {
             eprintln!("remagic-upload: incoming peer sync failed: {error}");
-            config.status.message(&format!("设备同步失败：{error}"));
+            config
+                .status
+                .message(&format!("设备同步失败：{}", error.user_message()));
         }
         return Ok(());
     }

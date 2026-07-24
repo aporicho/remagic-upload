@@ -3,6 +3,7 @@ mod noise;
 mod protocol;
 pub(crate) mod reading;
 pub(crate) mod storage;
+mod transport;
 
 pub use discovery::{DiscoveredPeer, DiscoveryService};
 pub use noise::MAGIC;
@@ -11,15 +12,17 @@ use crate::catalog::{now_ms, Catalog, DeviceIdentity, ObjectRecord, TrustedPeer}
 use crate::server::SharedStatus;
 use discovery::pairing_code;
 use noise::{NoiseChannel, NoiseError};
-use protocol::{expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES};
+use protocol::{
+    expect_data_ack, expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES,
+};
 use reading::{merge as merge_reading, ReadingError, ReadingProvider};
 use std::io::{Read, Seek, SeekFrom};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use storage::{PeerStorage, StorageError};
 use thiserror::Error;
+use transport::{configure, connect_any};
 
 pub struct PeerRuntime {
     catalog: Arc<Catalog>,
@@ -96,12 +99,12 @@ impl PeerRuntime {
                         self.storage.apply_tombstone(record)?;
                         summary.deleted += 1;
                     } else {
-                        pull(&mut channel, &self.storage, record)?;
+                        pull(&mut channel, &self.storage, &self.status, record)?;
                         summary.received += 1;
                     }
                 }
                 Winner::Local(record) => {
-                    push(&mut channel, &self.storage, record)?;
+                    push(&mut channel, &self.storage, &self.status, record)?;
                     if record.deleted {
                         summary.deleted += 1;
                     } else {
@@ -157,13 +160,15 @@ impl PeerRuntime {
                         .find(&kind, &path)?
                         .filter(|record| !record.deleted)
                         .ok_or(PeerError::MissingObject)?;
-                    send_file(channel, &self.storage, &record)?;
+                    send_file(channel, &self.storage, &self.status, &record)?;
                 }
                 Wire::PutStart(record) if record.deleted => {
                     self.storage.apply_tombstone(&record)?;
                     channel.send(&Wire::Applied)?;
                 }
-                Wire::PutStart(record) => receive_file(channel, &self.storage, record)?,
+                Wire::PutStart(record) => {
+                    receive_file(channel, &self.storage, &self.status, record)?
+                }
                 Wire::ReadingStart(length) => {
                     let received = receive_blob(channel, length)?;
                     let merged = merge_reading(&self.reading.export()?, remote_reading)?;
@@ -299,6 +304,7 @@ fn receive_snapshot(channel: &mut NoiseChannel) -> Result<Snapshot, PeerError> {
 fn pull(
     channel: &mut NoiseChannel,
     storage: &PeerStorage,
+    status: &SharedStatus,
     record: &ObjectRecord,
 ) -> Result<(), PeerError> {
     channel.send(&Wire::Get {
@@ -306,7 +312,9 @@ fn pull(
         path: record.path.clone(),
     })?;
     match channel.receive()? {
-        Wire::PutStart(received) if received == *record => receive_file(channel, storage, received),
+        Wire::PutStart(received) if received == *record => {
+            receive_file(channel, storage, status, received)
+        }
         _ => Err(ProtocolError::Unexpected.into()),
     }
 }
@@ -314,28 +322,31 @@ fn pull(
 fn push(
     channel: &mut NoiseChannel,
     storage: &PeerStorage,
+    status: &SharedStatus,
     record: &ObjectRecord,
 ) -> Result<(), PeerError> {
     channel.send(&Wire::PutStart(record.clone()))?;
     if record.deleted {
         expect_applied(channel.receive()?)
     } else {
-        send_file_body(channel, storage, record)
+        send_file_body(channel, storage, status, record)
     }
 }
 
 fn send_file(
     channel: &mut NoiseChannel,
     storage: &PeerStorage,
+    status: &SharedStatus,
     record: &ObjectRecord,
 ) -> Result<(), PeerError> {
     channel.send(&Wire::PutStart(record.clone()))?;
-    send_file_body(channel, storage, record)
+    send_file_body(channel, storage, status, record)
 }
 
 fn send_file_body(
     channel: &mut NoiseChannel,
     storage: &PeerStorage,
+    status: &SharedStatus,
     record: &ObjectRecord,
 ) -> Result<(), PeerError> {
     let offset = match channel.receive()? {
@@ -344,6 +355,9 @@ fn send_file_body(
     };
     let mut file = storage.open_local(record)?;
     file.seek(SeekFrom::Start(offset))?;
+    status.transfer(&record.path, record.size, "正在发送");
+    status.progress(offset);
+    let mut sent = offset;
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     loop {
         let size = file.read(&mut buffer)?;
@@ -351,6 +365,9 @@ fn send_file_body(
             break;
         }
         channel.send(&Wire::Data(buffer[..size].to_vec()))?;
+        sent += size as u64;
+        expect_data_ack(channel.receive()?, sent)?;
+        status.progress(sent);
     }
     channel.send(&Wire::FileEnd)?;
     expect_applied(channel.receive()?)
@@ -359,13 +376,21 @@ fn send_file_body(
 fn receive_file(
     channel: &mut NoiseChannel,
     storage: &PeerStorage,
+    status: &SharedStatus,
     record: ObjectRecord,
 ) -> Result<(), PeerError> {
     let mut incoming = storage.begin_receive(&record)?;
+    status.transfer(&record.path, record.size, "正在接收");
+    status.progress(incoming.offset());
     channel.send(&Wire::Resume(incoming.offset()))?;
     loop {
         match channel.receive()? {
-            Wire::Data(bytes) => incoming.write_chunk(&bytes)?,
+            Wire::Data(bytes) => {
+                incoming.write_chunk(&bytes)?;
+                let received = incoming.offset();
+                channel.send(&Wire::DataAck(received))?;
+                status.progress(received);
+            }
             Wire::FileEnd => break,
             _ => return Err(ProtocolError::Unexpected.into()),
         }
@@ -383,8 +408,11 @@ fn send_reading(channel: &mut NoiseChannel, bytes: &[u8]) -> Result<(), PeerErro
 }
 
 fn send_blob(channel: &mut NoiseChannel, bytes: &[u8]) -> Result<(), PeerError> {
+    let mut sent = 0_u64;
     for chunk in bytes.chunks(CHUNK_BYTES) {
         channel.send(&Wire::Data(chunk.to_vec()))?;
+        sent += chunk.len() as u64;
+        expect_data_ack(channel.receive()?, sent)?;
     }
     Ok(())
 }
@@ -407,7 +435,8 @@ fn receive_data(channel: &mut NoiseChannel, length: u64) -> Result<Vec<u8>, Peer
             Wire::Data(bytes)
                 if !bytes.is_empty() && output.len() + bytes.len() <= length as usize =>
             {
-                output.extend(bytes)
+                output.extend(bytes);
+                channel.send(&Wire::DataAck(output.len() as u64))?;
             }
             _ => return Err(ProtocolError::Unexpected.into()),
         }
@@ -428,28 +457,6 @@ fn expect_done(value: Wire) -> Result<(), PeerError> {
         Wire::Done => Ok(()),
         _ => Err(ProtocolError::Unexpected.into()),
     }
-}
-
-fn connect_any(addresses: &[impl ToSocketAddrs]) -> Result<TcpStream, PeerError> {
-    for address in addresses {
-        if let Ok(stream) = TcpStream::connect_timeout(
-            &address
-                .to_socket_addrs()?
-                .next()
-                .ok_or(PeerError::NoAddress)?,
-            Duration::from_secs(5),
-        ) {
-            return Ok(stream);
-        }
-    }
-    Err(PeerError::NoAddress)
-}
-
-fn configure(stream: &TcpStream) -> Result<(), std::io::Error> {
-    stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
-    Ok(())
 }
 
 struct ActiveGuard<'a>(&'a AtomicBool);
@@ -485,4 +492,25 @@ pub enum PeerError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Reading(#[from] ReadingError),
+}
+
+impl PeerError {
+    pub fn user_message(&self) -> String {
+        let mut current: &(dyn std::error::Error + 'static) = self;
+        loop {
+            if let Some(error) = current.downcast_ref::<std::io::Error>() {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) {
+                    return "网络传输超时；请重试，已接收部分会从断点继续".into();
+                }
+                return format!("网络连接失败：{error}");
+            }
+            let Some(source) = current.source() else {
+                return self.to_string();
+            };
+            current = source;
+        }
+    }
 }

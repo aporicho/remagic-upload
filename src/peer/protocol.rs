@@ -2,7 +2,10 @@ use crate::catalog::ObjectRecord;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const PROTOCOL_SCHEMA: u32 = crate::catalog::SYNC_SCHEMA;
+// Wire schema 2 adds bounded application-level backpressure for bulk data.
+// Keep this independent from the on-disk catalog schema: peers may evolve the
+// transport without forcing a local database migration.
+pub const PROTOCOL_SCHEMA: u32 = 2;
 pub const CLOCK_SKEW_LIMIT_MS: i64 = 2 * 60 * 1000;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_READING_BYTES: usize = 16 * 1024 * 1024;
@@ -21,6 +24,7 @@ pub enum Wire {
     },
     Record(ObjectRecord),
     Data(Vec<u8>),
+    DataAck(u64),
     SnapshotEnd,
     Get {
         kind: String,
@@ -67,6 +71,13 @@ pub fn validate_clock(local_ms: i64, remote_ms: i64) -> Result<(), ProtocolError
     }
 }
 
+pub fn expect_data_ack(value: Wire, expected: u64) -> Result<(), ProtocolError> {
+    match value {
+        Wire::DataAck(received) if received == expected => Ok(()),
+        _ => Err(ProtocolError::Unexpected),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("peer uses unsupported sync schema {0}")]
@@ -87,5 +98,11 @@ mod tests {
     fn rejects_dangerous_clock_skew() {
         assert!(validate_clock(1_000_000, 1_000_001).is_ok());
         assert!(validate_clock(0, CLOCK_SKEW_LIMIT_MS + 1).is_err());
+    }
+
+    #[test]
+    fn data_ack_must_match_the_exact_committed_offset() {
+        assert!(expect_data_ack(Wire::DataAck(32_768), 32_768).is_ok());
+        assert!(expect_data_ack(Wire::DataAck(32_767), 32_768).is_err());
     }
 }

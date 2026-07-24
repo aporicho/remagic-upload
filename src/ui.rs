@@ -173,8 +173,10 @@ impl UploadUi {
         } else {
             (height as f32 * 0.62) as usize
         };
-        let status_title = if model.status.active {
+        let status_title = if model.status.active && model.status.total > 0 {
             format!("正在上传：{}", model.status.filename)
+        } else if model.status.active {
+            format!("{}：{}", model.status.message, model.status.filename)
         } else {
             model.status.message.clone()
         };
