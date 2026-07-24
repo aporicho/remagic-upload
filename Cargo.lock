@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-app-sdk"
-version = "0.1.10"
+version = "0.1.15"
 dependencies = [
  "libc",
  "remagic-core",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-core"
-version = "0.1.10"
+version = "0.1.15"
 dependencies = [
  "base64",
  "libc",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-device"
-version = "0.1.10"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-protocol"
-version = "0.1.10"
+version = "0.1.15"
 dependencies = [
  "remagic-core",
  "serde",
