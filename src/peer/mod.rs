@@ -22,7 +22,7 @@ use noise::NoiseChannel;
 use protocol::{
     expect_data_ack, expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES,
 };
-use reading::{merge as merge_reading, ReadingProvider};
+use reading::{merge as merge_reading, ReadingProvider, ReadingScope};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,11 +132,12 @@ impl PeerRuntime {
                 Winner::Equal => {}
             }
         }
-        if selection.contains(SyncItem::Koreader) {
+        let reading_scope = reading_scope(&selection);
+        if reading_scope.any() {
             let merged = merge_reading(&local.reading, &remote.reading)?;
             send_reading(&mut channel, &merged)?;
             expect_applied(channel.receive()?)?;
-            self.reading.import(&merged)?;
+            self.reading.import(&merged, reading_scope)?;
         }
         channel.send(&Wire::Done)?;
         expect_done(channel.receive()?)?;
@@ -197,11 +198,12 @@ impl PeerRuntime {
                 Wire::PutStart(record) if self.storage.kind_in_scope(&record.kind, selection) => {
                     receive_file(channel, &self.storage, &self.status, record)?
                 }
-                Wire::ReadingStart(length) if selection.contains(SyncItem::Koreader) => {
+                Wire::ReadingStart(length) if reading_scope(selection).any() => {
                     let received = receive_blob(channel, length)?;
-                    let merged = merge_reading(&self.reading.export()?, remote_reading)?;
+                    let scope = reading_scope(selection);
+                    let merged = merge_reading(&self.reading.export(scope)?, remote_reading)?;
                     let final_state = merge_reading(&merged, &received)?;
-                    self.reading.import(&final_state)?;
+                    self.reading.import(&final_state, scope)?;
                     channel.send(&Wire::Applied)?;
                 }
                 Wire::Get { .. } | Wire::PutStart(_) | Wire::ReadingStart(_) => {
@@ -220,8 +222,9 @@ impl PeerRuntime {
 
     fn snapshot(&self, selection: &SyncSelection) -> Result<Snapshot, PeerError> {
         self.quiesce(selection)?;
-        let reading = if selection.contains(SyncItem::Koreader) {
-            self.reading.export()?
+        let scope = reading_scope(selection);
+        let reading = if scope.any() {
+            self.reading.export(scope)?
         } else {
             Vec::new()
         };
@@ -290,6 +293,13 @@ fn receive_scope(channel: &mut NoiseChannel) -> Result<SyncSelection, PeerError>
     match channel.receive()? {
         Wire::Scope(selection) => Ok(selection),
         _ => Err(ProtocolError::Unexpected.into()),
+    }
+}
+
+fn reading_scope(selection: &SyncSelection) -> ReadingScope {
+    ReadingScope {
+        reading: selection.contains(SyncItem::Koreader),
+        font_size: selection.contains(SyncItem::KoreaderFontSize),
     }
 }
 

@@ -10,15 +10,17 @@ const SETTINGS_FILE: &str = "sync-settings.json";
 pub enum SyncItem {
     Books,
     Koreader,
+    KoreaderFontSize,
     Magicpaper,
     Wallpapers,
     AiKeys,
 }
 
 impl SyncItem {
-    pub const ALL: [SyncItem; 5] = [
+    pub const ALL: [SyncItem; 6] = [
         SyncItem::Books,
         SyncItem::Koreader,
+        SyncItem::KoreaderFontSize,
         SyncItem::Magicpaper,
         SyncItem::Wallpapers,
         SyncItem::AiKeys,
@@ -28,6 +30,7 @@ impl SyncItem {
         match self {
             SyncItem::Books => "书籍",
             SyncItem::Koreader => "KOReader",
+            SyncItem::KoreaderFontSize => "字体大小",
             SyncItem::Magicpaper => "MagicPaper",
             SyncItem::Wallpapers => "壁纸",
             SyncItem::AiKeys => "AI 密钥",
@@ -38,6 +41,7 @@ impl SyncItem {
         match self {
             SyncItem::Books => "书籍",
             SyncItem::Koreader => "KOReader 数据",
+            SyncItem::KoreaderFontSize => "字体大小",
             SyncItem::Magicpaper => "MagicPaper 数据",
             SyncItem::Wallpapers => "壁纸",
             SyncItem::AiKeys => "AI 密钥",
@@ -51,6 +55,8 @@ pub struct SyncSelection {
     pub books: bool,
     #[serde(default = "enabled")]
     pub koreader: bool,
+    #[serde(default = "disabled")]
+    pub koreader_font_size: bool,
     #[serde(default = "enabled")]
     pub magicpaper: bool,
     #[serde(default = "enabled")]
@@ -64,6 +70,7 @@ impl Default for SyncSelection {
         Self {
             books: true,
             koreader: true,
+            koreader_font_size: false,
             magicpaper: true,
             wallpapers: true,
             ai_keys: true,
@@ -92,6 +99,7 @@ impl SyncSelection {
         match item {
             SyncItem::Books => self.books,
             SyncItem::Koreader => self.koreader,
+            SyncItem::KoreaderFontSize => self.koreader_font_size,
             SyncItem::Magicpaper => self.magicpaper,
             SyncItem::Wallpapers => self.wallpapers,
             SyncItem::AiKeys => self.ai_keys,
@@ -102,6 +110,7 @@ impl SyncSelection {
         match item {
             SyncItem::Books => self.books = enabled,
             SyncItem::Koreader => self.koreader = enabled,
+            SyncItem::KoreaderFontSize => self.koreader_font_size = enabled,
             SyncItem::Magicpaper => self.magicpaper = enabled,
             SyncItem::Wallpapers => self.wallpapers = enabled,
             SyncItem::AiKeys => self.ai_keys = enabled,
@@ -133,25 +142,32 @@ fn enabled() -> bool {
     true
 }
 
+fn disabled() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_selects_everything() {
+    fn default_selects_core_items_without_font_size() {
         let selection = SyncSelection::default();
-        assert!(SyncItem::ALL
-            .iter()
-            .copied()
-            .all(|item| selection.contains(item)));
+        assert!(selection.books);
+        assert!(selection.koreader);
+        assert!(!selection.koreader_font_size);
+        assert!(selection.magicpaper);
+        assert!(selection.wallpapers);
+        assert!(selection.ai_keys);
         assert!(selection.any());
     }
 
     #[test]
-    fn missing_new_fields_stay_enabled() {
+    fn missing_new_fields_keep_safe_defaults() {
         let selection: SyncSelection = serde_json::from_slice(br#"{"books":false}"#).unwrap();
         assert!(!selection.books);
         assert!(selection.koreader);
+        assert!(!selection.koreader_font_size);
         assert!(selection.magicpaper);
         assert!(selection.wallpapers);
         assert!(selection.ai_keys);

@@ -70,11 +70,6 @@ pub(super) fn roots_for(
                 home.join(".local/share/remagic-koreader/data"),
                 Filter::KoreaderData,
             ),
-            SyncRoot::new(
-                "koreader_sidecar",
-                books.to_path_buf(),
-                Filter::KoreaderSidecar,
-            ),
         ]);
     }
     if selection.contains(SyncItem::Magicpaper) {
@@ -238,7 +233,14 @@ fn is_koreader_data(path: &str) -> bool {
         component_name(component).is_some_and(|name| {
             matches!(
                 name,
-                "cache" | "cr3cache" | "tmpcr3cache" | "ota" | "logs" | "log"
+                "cache"
+                    | "cr3cache"
+                    | "tmpcr3cache"
+                    | "ota"
+                    | "logs"
+                    | "log"
+                    | "docsettings"
+                    | "hashdocsettings"
             )
         })
     })

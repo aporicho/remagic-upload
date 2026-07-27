@@ -50,7 +50,7 @@ fn winner_pairs_are_deterministic() {
 }
 
 #[test]
-fn scan_includes_selected_app_data_without_secret_leakage() {
+fn scan_includes_selected_app_data_without_secret_or_docsettings_leakage() {
     let root = fixture();
     let xochitl = root.join(".local/share/remarkable/xochitl");
     fs::create_dir_all(xochitl.join("a.sdr")).unwrap();
@@ -66,6 +66,14 @@ fn scan_includes_selected_app_data_without_secret_leakage() {
     )
     .unwrap();
     fs::write(xochitl.join(".thumb-cache"), b"cache").unwrap();
+    let koreader_data = root.join(".local/share/koreader-for-remagic/data");
+    fs::create_dir_all(koreader_data.join("docsettings/a.sdr")).unwrap();
+    fs::write(koreader_data.join("history.lua"), b"return {}").unwrap();
+    fs::write(
+        koreader_data.join("docsettings/a.sdr/metadata.epub.lua"),
+        b"return {}",
+    )
+    .unwrap();
     fs::create_dir_all(root.join(".config/magicpaper")).unwrap();
     fs::write(root.join(".config/magicpaper/preferences.json"), b"{}").unwrap();
     fs::write(root.join(".config/magicpaper/oracle.env"), b"SECRET=1").unwrap();
@@ -93,11 +101,42 @@ fn scan_includes_selected_app_data_without_secret_leakage() {
         "11111111-1111-4111-8111-111111111111.epub"
     )));
     assert!(!keys.contains(&("xochitl_document", ".thumb-cache")));
-    assert!(keys.contains(&("koreader_sidecar", "a.sdr/metadata.epub.lua")));
+    assert!(keys.contains(&("koreader_data", "history.lua")));
+    assert!(!keys.contains(&("koreader_data", "docsettings/a.sdr/metadata.epub.lua")));
+    assert!(!keys.contains(&("koreader_sidecar", "a.sdr/metadata.epub.lua")));
     assert!(keys.contains(&("magicpaper_config", "preferences.json")));
     assert!(!keys.contains(&("magicpaper_config", "oracle.env")));
     assert!(keys.contains(&("magicpaper_oracle_secret", "oracle.env")));
     assert!(keys.contains(&("remagic_secret", "openai.env")));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn font_size_selection_does_not_enable_raw_docsettings() {
+    let root = fixture();
+    let xochitl = root.join(".local/share/remarkable/xochitl");
+    fs::create_dir_all(xochitl.join("a.sdr")).unwrap();
+    fs::write(xochitl.join("a.sdr/metadata.epub.lua"), b"return {}").unwrap();
+
+    let koreader_data = root.join(".local/share/koreader-for-remagic/data");
+    fs::create_dir_all(koreader_data.join("docsettings/a.sdr")).unwrap();
+    fs::write(
+        koreader_data.join("docsettings/a.sdr/metadata.epub.lua"),
+        b"return {}",
+    )
+    .unwrap();
+
+    let mut selection = SyncSelection::default();
+    selection.set(crate::sync_scope::SyncItem::KoreaderFontSize, true);
+    let storage = storage(&root);
+    let records = storage.scan(&selection).unwrap();
+    let keys = records
+        .iter()
+        .map(|record| (record.kind.as_str(), record.path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(!keys.contains(&("koreader_sidecar", "a.sdr/metadata.epub.lua")));
+    assert!(!keys.contains(&("koreader_data", "docsettings/a.sdr/metadata.epub.lua")));
     fs::remove_dir_all(root).unwrap();
 }
 
