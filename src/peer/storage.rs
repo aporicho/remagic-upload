@@ -33,6 +33,7 @@ pub struct IncomingFile {
 
 impl PeerStorage {
     pub fn new(
+        home: PathBuf,
         books: PathBuf,
         wallpapers: PathBuf,
         catalog: Arc<Catalog>,
@@ -40,10 +41,7 @@ impl PeerStorage {
     ) -> Result<Self, StorageError> {
         ensure_root(&books)?;
         ensure_root(&wallpapers)?;
-        let home = books
-            .parent()
-            .unwrap_or(Path::new("/home/root"))
-            .to_path_buf();
+        ensure_root(&home)?;
         Ok(Self {
             home,
             books,
@@ -258,6 +256,8 @@ fn validate_record_path(record: &ObjectRecord) -> Result<(), StorageError> {
 fn validate_format(record: &ObjectRecord, path: &Path) -> Result<(), StorageError> {
     match record.kind.as_str() {
         "book" => validate_book(path, &record.path)?,
+        "xochitl_document" if is_book_path(&record.path) => validate_book(path, &record.path)?,
+        "xochitl_document" => {}
         "wallpaper" => validate_png(path)?,
         "home_settings"
         | "koreader_data"
@@ -274,6 +274,18 @@ fn validate_format(record: &ObjectRecord, path: &Path) -> Result<(), StorageErro
         _ => return Err(StorageError::InvalidKind),
     }
     Ok(())
+}
+
+fn is_book_path(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "pdf" | "djvu" | "djv" | "mobi" | "azw3" | "fb2" | "epub" | "cbz" | "cbr" | "txt"
+    )
 }
 
 fn hash_file(path: &Path) -> Result<String, io::Error> {

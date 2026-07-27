@@ -7,6 +7,7 @@ pub(super) fn validate_kind(kind: &str) -> Result<(), CatalogError> {
     if matches!(
         kind,
         "book"
+            | "xochitl_document"
             | "wallpaper"
             | "home_settings"
             | "koreader_data"

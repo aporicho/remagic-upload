@@ -14,12 +14,13 @@ fn fixture() -> PathBuf {
 }
 
 fn storage(root: &Path) -> PeerStorage {
-    let books = root.join("books");
+    let books = root.join(".local/share/remarkable/xochitl");
     let wallpapers = root.join(".local/share/remagic/wallpapers");
     fs::create_dir_all(&books).unwrap();
     fs::create_dir_all(&wallpapers).unwrap();
     let catalog = Arc::new(Catalog::open(&root.join(".local/share/upload"), "test").unwrap());
     PeerStorage::new(
+        root.to_path_buf(),
         books,
         wallpapers,
         catalog,
@@ -51,9 +52,20 @@ fn winner_pairs_are_deterministic() {
 #[test]
 fn scan_includes_selected_app_data_without_secret_leakage() {
     let root = fixture();
-    fs::create_dir_all(root.join("books/a.sdr")).unwrap();
-    fs::write(root.join("books/a.epub"), b"book").unwrap();
-    fs::write(root.join("books/a.sdr/metadata.epub.lua"), b"return {}").unwrap();
+    let xochitl = root.join(".local/share/remarkable/xochitl");
+    fs::create_dir_all(xochitl.join("a.sdr")).unwrap();
+    fs::write(xochitl.join("a.sdr/metadata.epub.lua"), b"return {}").unwrap();
+    fs::write(
+        xochitl.join("11111111-1111-4111-8111-111111111111.metadata"),
+        b"{}",
+    )
+    .unwrap();
+    fs::write(
+        xochitl.join("11111111-1111-4111-8111-111111111111.epub"),
+        b"book",
+    )
+    .unwrap();
+    fs::write(xochitl.join(".thumb-cache"), b"cache").unwrap();
     fs::create_dir_all(root.join(".config/magicpaper")).unwrap();
     fs::write(root.join(".config/magicpaper/preferences.json"), b"{}").unwrap();
     fs::write(root.join(".config/magicpaper/oracle.env"), b"SECRET=1").unwrap();
@@ -71,7 +83,16 @@ fn scan_includes_selected_app_data_without_secret_leakage() {
         .map(|record| (record.kind.as_str(), record.path.as_str()))
         .collect::<Vec<_>>();
 
-    assert!(keys.contains(&("book", "a.epub")));
+    assert!(!keys.contains(&("book", "a.epub")));
+    assert!(keys.contains(&(
+        "xochitl_document",
+        "11111111-1111-4111-8111-111111111111.metadata"
+    )));
+    assert!(keys.contains(&(
+        "xochitl_document",
+        "11111111-1111-4111-8111-111111111111.epub"
+    )));
+    assert!(!keys.contains(&("xochitl_document", ".thumb-cache")));
     assert!(keys.contains(&("koreader_sidecar", "a.sdr/metadata.epub.lua")));
     assert!(keys.contains(&("magicpaper_config", "preferences.json")));
     assert!(!keys.contains(&("magicpaper_config", "oracle.env")));

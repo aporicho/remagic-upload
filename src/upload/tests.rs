@@ -74,6 +74,42 @@ fn registry_streams_valid_content_and_preserves_the_original_name() {
 }
 
 #[test]
+fn managed_native_library_imports_books_as_xochitl_documents() {
+    let root = temp_dir();
+    let books = root.join(".local/share/remarkable/xochitl");
+    let wallpapers = root.join(".local/share/remagic/wallpapers");
+    let data = root.join(".local/share/upload");
+    fs::create_dir_all(&books).unwrap();
+    fs::create_dir_all(&wallpapers).unwrap();
+    let catalog = Arc::new(Catalog::open(&data, "test").unwrap());
+    let registry =
+        UploadRegistry::managed(books.clone(), wallpapers.clone(), catalog, &data).unwrap();
+    let payload = b"%PDF-1.7\nminimal fixture\n";
+    let mut reader = Cursor::new(payload);
+    let status = Arc::new(SharedStatus::new());
+    let published = registry
+        .receive(
+            UploadKind::Book,
+            "%E8%AE%BA%E8%AF%AD.pdf",
+            payload.len() as u64,
+            &mut reader,
+            &AtomicBool::new(false),
+            &status,
+        )
+        .unwrap();
+
+    let uuid = published.file_stem().unwrap().to_str().unwrap();
+    assert_eq!(published.extension().unwrap(), "pdf");
+    assert!(books.join(format!("{uuid}.metadata")).is_file());
+    assert!(books.join(format!("{uuid}.content")).is_file());
+    assert!(books.join(format!("{uuid}.local")).is_file());
+    assert!(books.join(format!("{uuid}.pagedata")).is_file());
+    let metadata = fs::read_to_string(books.join(format!("{uuid}.metadata"))).unwrap();
+    assert!(metadata.contains("\"visibleName\": \"论语\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn interrupted_stream_removes_the_temporary_file() {
     let books = temp_dir();
     let wallpapers = temp_dir();

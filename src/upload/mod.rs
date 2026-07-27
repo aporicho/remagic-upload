@@ -1,5 +1,6 @@
 mod naming;
 pub(crate) mod validate;
+mod xochitl;
 
 use crate::server::SharedStatus;
 use crate::{catalog::Catalog, trash::Trash};
@@ -48,6 +49,7 @@ impl UploadKind {
 pub struct UploadRegistry {
     books_dir: PathBuf,
     wallpapers_dir: PathBuf,
+    books_native: bool,
     catalog: Option<Arc<Catalog>>,
     trash: Option<Trash>,
 }
@@ -62,6 +64,7 @@ impl UploadRegistry {
         Ok(Self {
             books_dir,
             wallpapers_dir,
+            books_native: false,
             catalog: None,
             trash: None,
         })
@@ -77,9 +80,11 @@ impl UploadRegistry {
         validate_destination(&wallpapers_dir)?;
         cleanup_parts(&books_dir)?;
         cleanup_parts(&wallpapers_dir)?;
+        let books_native = xochitl::is_native_library(&books_dir);
         Ok(Self {
             books_dir,
             wallpapers_dir,
+            books_native,
             catalog: Some(catalog),
             trash: Some(Trash::new(data_home)?),
         })
@@ -119,6 +124,14 @@ impl UploadRegistry {
                 UploadKind::Book => validate_book(&temporary, &filename)?,
                 UploadKind::Wallpaper => validate_png(&temporary)?,
             }
+            if kind == UploadKind::Book && self.books_native {
+                return publish_native_book(
+                    &temporary,
+                    destination,
+                    &filename,
+                    self.catalog.as_deref(),
+                );
+            }
             if let (Some(catalog), Some(trash)) = (&self.catalog, &self.trash) {
                 publish_replacing(&temporary, destination, &filename, kind, catalog, trash)
             } else {
@@ -130,6 +143,18 @@ impl UploadRegistry {
         }
         result
     }
+}
+
+fn publish_native_book(
+    temporary: &Path,
+    destination: &Path,
+    filename: &str,
+    catalog: Option<&Catalog>,
+) -> Result<PathBuf, UploadError> {
+    let Some(catalog) = catalog else {
+        return publish_no_overwrite(temporary, destination, filename);
+    };
+    xochitl::publish_book(temporary, destination, filename, catalog)
 }
 
 fn publish_replacing(

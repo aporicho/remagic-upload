@@ -21,8 +21,10 @@ impl SyncRoot {
 pub(super) enum Filter {
     All,
     Book,
+    XochitlDocument,
     Wallpaper,
     Exact(&'static str),
+    KoreaderData,
     KoreaderSidecar,
     MagicpaperConfig,
 }
@@ -32,8 +34,10 @@ impl Filter {
         match self {
             Filter::All => true,
             Filter::Book => is_supported_book(relative),
+            Filter::XochitlDocument => is_xochitl_document(relative),
             Filter::Wallpaper => extension(relative) == "png",
             Filter::Exact(expected) => relative == expected,
+            Filter::KoreaderData => is_koreader_data(relative),
             Filter::KoreaderSidecar => is_koreader_sidecar(relative),
             Filter::MagicpaperConfig => !has_component(relative, "oracle.env"),
         }
@@ -48,19 +52,23 @@ pub(super) fn roots_for(
 ) -> Vec<SyncRoot> {
     let mut roots = Vec::new();
     if selection.contains(SyncItem::Books) {
-        roots.push(SyncRoot::new("book", books.to_path_buf(), Filter::Book));
+        roots.push(SyncRoot::new(
+            "xochitl_document",
+            books.to_path_buf(),
+            Filter::XochitlDocument,
+        ));
     }
     if selection.contains(SyncItem::Koreader) {
         roots.extend([
             SyncRoot::new(
                 "koreader_data",
                 home.join(".local/share/koreader-for-remagic/data"),
-                Filter::All,
+                Filter::KoreaderData,
             ),
             SyncRoot::new(
                 "koreader_legacy_data",
                 home.join(".local/share/remagic-koreader/data"),
-                Filter::All,
+                Filter::KoreaderData,
             ),
             SyncRoot::new(
                 "koreader_sidecar",
@@ -138,6 +146,7 @@ pub(super) fn root_for_kind(
 ) -> Option<PathBuf> {
     match kind {
         "book" => Some(books.to_path_buf()),
+        "xochitl_document" => Some(books.to_path_buf()),
         "wallpaper" => Some(wallpapers.to_path_buf()),
         "home_settings" => Some(home.join(".config/remagic")),
         "koreader_data" => Some(home.join(".local/share/koreader-for-remagic/data")),
@@ -158,9 +167,10 @@ pub(super) fn root_for_kind(
 pub(super) fn filter_for_kind(kind: &str) -> Option<Filter> {
     match kind {
         "book" => Some(Filter::Book),
+        "xochitl_document" => Some(Filter::XochitlDocument),
         "wallpaper" => Some(Filter::Wallpaper),
         "home_settings" => Some(Filter::Exact("home.toml")),
-        "koreader_data" | "koreader_legacy_data" => Some(Filter::All),
+        "koreader_data" | "koreader_legacy_data" => Some(Filter::KoreaderData),
         "koreader_sidecar" => Some(Filter::KoreaderSidecar),
         "magicpaper_data"
         | "magicpaper_legacy_data"
@@ -172,6 +182,66 @@ pub(super) fn filter_for_kind(kind: &str) -> Option<Filter> {
         "magicpaper_oracle_secret" => Some(Filter::Exact("oracle.env")),
         _ => None,
     }
+}
+
+fn is_xochitl_document(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.components().count() != 1 {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if !is_uuid(stem) {
+        return false;
+    }
+    matches!(
+        extension(path.to_str().unwrap_or_default()).as_str(),
+        "metadata"
+            | "content"
+            | "local"
+            | "pagedata"
+            | "epubindex"
+            | "tombstone"
+            | "pdf"
+            | "epub"
+            | "djvu"
+            | "djv"
+            | "mobi"
+            | "azw3"
+            | "fb2"
+            | "cbz"
+            | "cbr"
+            | "txt"
+    )
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
+}
+
+fn is_koreader_data(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with("-wal")
+        || lower.ends_with("-shm")
+        || lower.ends_with(".lock")
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".part")
+    {
+        return false;
+    }
+    !Path::new(&lower).components().any(|component| {
+        component_name(component).is_some_and(|name| {
+            matches!(
+                name,
+                "cache" | "cr3cache" | "tmpcr3cache" | "ota" | "logs" | "log"
+            )
+        })
+    })
 }
 
 fn is_supported_book(path: &str) -> bool {

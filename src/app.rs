@@ -44,6 +44,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     };
     let catalog = Arc::new(Catalog::open(&environment.data_home, device_name)?);
     let storage = crate::peer::storage::PeerStorage::new(
+        std::path::PathBuf::from("/home/root"),
         books_dir.clone(),
         wallpapers_dir.clone(),
         Arc::clone(&catalog),
