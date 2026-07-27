@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::peer::DiscoveredPeer;
 use crate::server::StatusSnapshot;
+use crate::sync_scope::{SyncItem, SyncSelection};
 
 const UI_FONT: &str = "/home/root/apps/remagic/fonts/UIFont.ttf";
 const GRAY: Rgb565 = 0x8410;
@@ -32,6 +33,7 @@ pub struct UploadUi {
     font: FontArc,
     pub refresh_button: Rect,
     pub sync_button: Rect,
+    sync_item_buttons: Vec<(SyncItem, Rect)>,
     pub status_region: Rect,
 }
 
@@ -42,6 +44,8 @@ pub struct ScreenModel<'a> {
     pub status: &'a StatusSnapshot,
     pub refresh_pressed: bool,
     pub sync_pressed: bool,
+    pub item_pressed: Option<SyncItem>,
+    pub sync_selection: &'a SyncSelection,
     pub peer: Option<&'a DiscoveredPeer>,
     pub peer_trusted: bool,
 }
@@ -68,6 +72,7 @@ impl UploadUi {
                 width: 0,
                 height: 0,
             },
+            sync_item_buttons: Vec::new(),
             status_region: Rect {
                 x: 0,
                 y: 0,
@@ -82,6 +87,7 @@ impl UploadUi {
         let height = surface.height();
         let margin = (width as f32 * 0.055).round() as usize;
         let unit = (width as f32 / 954.0).clamp(1.0, 1.70);
+        self.sync_item_buttons.clear();
         surface.clear(WHITE);
         self.text(
             surface,
@@ -93,7 +99,7 @@ impl UploadUi {
         );
         self.text(
             surface,
-            "浏览器上传，或与另一台 ReMagic 设备同步阅读进度",
+            "浏览器上传，或与另一台 ReMagic 设备同步所选数据",
             margin as f32,
             margin as f32 + 75.0 * unit,
             25.0 * unit,
@@ -219,9 +225,9 @@ impl UploadUi {
         }
 
         let peer_text = match model.peer {
-            Some(peer) if model.peer_trusted => format!("进度同步：{}　已配对", peer.name),
-            Some(peer) => format!("进度同步：{}　配对码 {}", peer.name, peer.pairing_code),
-            None => "进度同步：等待局域网发现".to_owned(),
+            Some(peer) if model.peer_trusted => format!("设备同步：{}　已配对", peer.name),
+            Some(peer) => format!("设备同步：{}　配对码 {}", peer.name, peer.pairing_code),
+            None => "设备同步：等待局域网发现".to_owned(),
         };
         self.text_fit(
             surface,
@@ -231,6 +237,60 @@ impl UploadUi {
             24.0 * unit,
             GRAY,
         );
+
+        let options_y = bar_y.saturating_add((111.0 * unit) as usize);
+        self.text(
+            surface,
+            "同步项",
+            margin as f32,
+            options_y as f32,
+            24.0 * unit,
+            GRAY,
+        );
+        let row_height = (49.0 * unit) as usize;
+        let checkbox = (28.0 * unit).max(24.0) as usize;
+        let mut row_y = options_y.saturating_add((37.0 * unit) as usize);
+        for item in SyncItem::ALL {
+            let rect = Rect {
+                x: margin,
+                y: row_y,
+                width: width.saturating_sub(margin * 2),
+                height: row_height,
+            };
+            self.sync_item_buttons.push((item, rect));
+            let pressed = model.item_pressed == Some(item);
+            if pressed {
+                surface.fill_rect(rect.x, rect.y, rect.width, rect.height, 0xef7d);
+            }
+            let box_y = rect.y + rect.height.saturating_sub(checkbox) / 2;
+            surface.stroke_rect(
+                rect.x,
+                box_y,
+                checkbox,
+                checkbox,
+                (3.0 * unit).max(2.0) as usize,
+                BLACK,
+            );
+            if model.sync_selection.contains(item) {
+                let inset = (7.0 * unit).max(5.0) as usize;
+                surface.fill_rect(
+                    rect.x + inset,
+                    box_y + inset,
+                    checkbox.saturating_sub(inset * 2),
+                    checkbox.saturating_sub(inset * 2),
+                    BLACK,
+                );
+            }
+            self.text(
+                surface,
+                item.label(),
+                (rect.x + checkbox + (18.0 * unit) as usize) as f32,
+                rect.y as f32 + (7.0 * unit),
+                25.0 * unit,
+                BLACK,
+            );
+            row_y = row_y.saturating_add(row_height);
+        }
 
         let button_height = (92.0 * unit) as usize;
         let gap = (18.0 * unit) as usize;
@@ -307,7 +367,7 @@ impl UploadUi {
         self.text_centered(
             surface,
             if model.peer_trusted {
-                "同步进度"
+                "同步所选"
             } else {
                 "确认配对"
             },
@@ -324,6 +384,19 @@ impl UploadUi {
             width: self.sync_button.x + self.sync_button.width - self.refresh_button.x,
             height: self.refresh_button.height,
         }
+    }
+
+    pub fn sync_item_at(&self, x: i32, y: i32) -> Option<SyncItem> {
+        self.sync_item_buttons
+            .iter()
+            .find_map(|(item, rect)| rect.contains(x, y).then_some(*item))
+    }
+
+    pub fn sync_item_contains(&self, item: SyncItem, x: i32, y: i32) -> bool {
+        self.sync_item_buttons
+            .iter()
+            .find(|(candidate, _)| *candidate == item)
+            .is_some_and(|(_, rect)| rect.contains(x, y))
     }
 
     fn qr(&self, surface: &mut Surface<'_>, content: &str, x: usize, y: usize, size: usize) {

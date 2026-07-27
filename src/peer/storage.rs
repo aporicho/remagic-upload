@@ -1,7 +1,9 @@
 use crate::catalog::{Catalog, ObjectRecord};
+use crate::sync_scope::SyncSelection;
 use crate::trash::Trash;
 use crate::upload::validate::{validate_book, validate_png};
 use blake3::Hasher;
+use roots::{filter_for_kind, root_for_kind, roots_for};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -9,8 +11,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+mod roots;
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 pub struct PeerStorage {
+    home: PathBuf,
     books: PathBuf,
     wallpapers: PathBuf,
     catalog: Arc<Catalog>,
@@ -33,7 +40,12 @@ impl PeerStorage {
     ) -> Result<Self, StorageError> {
         ensure_root(&books)?;
         ensure_root(&wallpapers)?;
+        let home = books
+            .parent()
+            .unwrap_or(Path::new("/home/root"))
+            .to_path_buf();
         Ok(Self {
+            home,
             books,
             wallpapers,
             catalog,
@@ -41,9 +53,14 @@ impl PeerStorage {
         })
     }
 
-    pub fn scan(&self) -> Result<Vec<ObjectRecord>, StorageError> {
-        let mut records = self.catalog.scan("book", &self.books)?;
-        records.extend(self.catalog.scan("wallpaper", &self.wallpapers)?);
+    pub fn scan(&self, selection: &SyncSelection) -> Result<Vec<ObjectRecord>, StorageError> {
+        let mut records = Vec::new();
+        for root in roots_for(&self.home, &self.books, &self.wallpapers, selection) {
+            records.extend(
+                self.catalog
+                    .scan_filtered(root.kind, &root.path, |relative| root.accepts(relative))?,
+            );
+        }
         Ok(records)
     }
 
@@ -116,6 +133,13 @@ impl PeerStorage {
             }
             return Err(error.into());
         }
+        if let Err(error) = set_file_mode(&destination, &incoming.record) {
+            let _ = fs::remove_file(&destination);
+            if let Some(previous) = previous {
+                let _ = self.trash.restore(&previous, &destination);
+            }
+            return Err(error.into());
+        }
         if let Err(error) = self
             .catalog
             .store_remote(&incoming.record, modified_ms(&destination)?)
@@ -163,20 +187,27 @@ impl PeerStorage {
         map.into_values().collect()
     }
 
+    pub fn kind_in_scope(&self, kind: &str, selection: &SyncSelection) -> bool {
+        roots_for(&self.home, &self.books, &self.wallpapers, selection)
+            .iter()
+            .any(|root| root.kind == kind)
+    }
+
     fn path_for(&self, record: &ObjectRecord) -> Result<PathBuf, StorageError> {
         validate_record_path(record)?;
-        let root = match record.kind.as_str() {
-            "book" => &self.books,
-            "wallpaper" => &self.wallpapers,
-            _ => return Err(StorageError::InvalidKind),
-        };
+        let root = root_for_kind(&self.home, &self.books, &self.wallpapers, &record.kind)
+            .ok_or(StorageError::InvalidKind)?;
         Ok(root.join(&record.path))
     }
 
     fn part_path(&self, record: &ObjectRecord) -> Result<PathBuf, StorageError> {
         let destination = self.path_for(record)?;
         let token = &blake3::hash(
-            format!("{}:{}:{}", record.kind, record.path, record.version.counter).as_bytes(),
+            format!(
+                "{}:{}:{}:{}",
+                record.kind, record.path, record.version.origin, record.version.counter
+            )
+            .as_bytes(),
         )
         .to_hex()[..16];
         Ok(destination
@@ -217,7 +248,7 @@ fn validate_record_path(record: &ObjectRecord) -> Result<(), StorageError> {
                     | Component::Prefix(_)
             )
         })
-        || !matches!(record.kind.as_str(), "book" | "wallpaper")
+        || !filter_for_kind(&record.kind).is_some_and(|filter| filter.accepts(&record.path))
     {
         return Err(StorageError::UnsafePath(path.to_path_buf()));
     }
@@ -228,6 +259,18 @@ fn validate_format(record: &ObjectRecord, path: &Path) -> Result<(), StorageErro
     match record.kind.as_str() {
         "book" => validate_book(path, &record.path)?,
         "wallpaper" => validate_png(path)?,
+        "home_settings"
+        | "koreader_data"
+        | "koreader_legacy_data"
+        | "koreader_sidecar"
+        | "magicpaper_data"
+        | "magicpaper_config"
+        | "magicpaper_legacy_data"
+        | "magicpaper_legacy_config"
+        | "magicpaper_riddle_data"
+        | "magicpaper_riddle_config"
+        | "remagic_secret"
+        | "magicpaper_oracle_secret" => {}
         _ => return Err(StorageError::InvalidKind),
     }
     Ok(())
@@ -264,6 +307,28 @@ fn ensure_root(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn set_file_mode(path: &Path, record: &ObjectRecord) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut mode = record.mode & 0o777;
+        if matches!(
+            record.kind.as_str(),
+            "remagic_secret" | "magicpaper_oracle_secret"
+        ) {
+            mode = 0o600;
+        } else if mode == 0 {
+            mode = 0o644;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, record);
+    }
+    Ok(())
+}
+
 fn sync_parent(path: &Path) -> Result<(), io::Error> {
     File::open(
         path.parent()
@@ -294,29 +359,4 @@ pub enum StorageError {
     Trash(#[from] crate::trash::TrashError),
     #[error(transparent)]
     Upload(#[from] crate::upload::UploadError),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn winner_pairs_are_deterministic() {
-        let record = ObjectRecord {
-            kind: "book".into(),
-            path: "a.epub".into(),
-            size: 1,
-            hash: "0".repeat(64),
-            version: crate::catalog::VersionStamp {
-                wall_time_ms: 1,
-                counter: 1,
-                origin: "0123456789abcdef".into(),
-            },
-            deleted: false,
-        };
-        let pairs =
-            PeerStorage::winners(std::slice::from_ref(&record), std::slice::from_ref(&record));
-        assert_eq!(pairs.len(), 1);
-        assert!(pairs[0].0.is_some() && pairs[0].1.is_some());
-    }
 }

@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-upload"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "bincode",
@@ -736,6 +736,7 @@ dependencies = [
  "rand",
  "remagic-app-sdk",
  "remagic-core",
+ "remagic-protocol",
  "rusqlite",
  "serde",
  "serde_json",

@@ -1,11 +1,12 @@
 use crate::catalog::ObjectRecord;
+use crate::sync_scope::SyncSelection;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// Wire schema 2 adds bounded application-level backpressure for bulk data.
+// Wire schema 3 adds an initiator-owned sync item selection before snapshots.
 // Keep this independent from the on-disk catalog schema: peers may evolve the
 // transport without forcing a local database migration.
-pub const PROTOCOL_SCHEMA: u32 = 2;
+pub const PROTOCOL_SCHEMA: u32 = 3;
 pub const CLOCK_SKEW_LIMIT_MS: i64 = 2 * 60 * 1000;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_READING_BYTES: usize = 16 * 1024 * 1024;
@@ -18,6 +19,7 @@ pub enum Wire {
         name: String,
         time_ms: i64,
     },
+    Scope(SyncSelection),
     SnapshotStart {
         records: u32,
         reading_bytes: u64,

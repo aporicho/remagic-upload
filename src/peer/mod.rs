@@ -1,38 +1,41 @@
+pub(crate) mod control;
 mod discovery;
 mod error;
 mod noise;
 mod protocol;
 pub(crate) mod reading;
 pub(crate) mod storage;
+mod summary;
 mod transport;
 
 pub use discovery::{DiscoveredPeer, DiscoveryService};
 pub use error::PeerError;
 pub use noise::MAGIC;
+pub use summary::SyncSummary;
 
 use crate::catalog::{now_ms, Catalog, DeviceIdentity, ObjectRecord, TrustedPeer};
 use crate::server::SharedStatus;
+use crate::sync_scope::{SyncItem, SyncSelection};
+use control::ControlClient;
 use discovery::pairing_code;
 use noise::NoiseChannel;
 use protocol::{
     expect_data_ack, expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES,
 };
 use reading::{merge as merge_reading, ReadingProvider};
-use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::PeerStorage;
+use summary::{winner, Winner};
 use transport::{configure, connect_any};
-
-const FILE_SYNC_ENV: &str = "REMAGIC_UPLOAD_SYNC_FILES";
-const FILE_SYNC_DISABLED_MESSAGE: &str = "此版本默认只同步 KOReader 阅读进度，未传输书籍文件";
 
 pub struct PeerRuntime {
     catalog: Arc<Catalog>,
     storage: PeerStorage,
     reading: ReadingProvider,
+    control: ControlClient,
     status: Arc<SharedStatus>,
     active: AtomicBool,
 }
@@ -42,12 +45,14 @@ impl PeerRuntime {
         catalog: Arc<Catalog>,
         storage: PeerStorage,
         reading: ReadingProvider,
+        control: ControlClient,
         status: Arc<SharedStatus>,
     ) -> Self {
         Self {
             catalog,
             storage,
             reading,
+            control,
             status,
             active: AtomicBool::new(false),
         }
@@ -73,8 +78,15 @@ impl PeerRuntime {
         Ok(())
     }
 
-    pub fn synchronize(&self, peer: &DiscoveredPeer) -> Result<SyncSummary, PeerError> {
+    pub fn synchronize(
+        &self,
+        peer: &DiscoveredPeer,
+        selection: SyncSelection,
+    ) -> Result<SyncSummary, PeerError> {
         let _guard = self.begin(&peer.name)?;
+        if !selection.any() {
+            return Err(PeerError::EmptySelection);
+        }
         if !self.is_trusted(peer)? {
             return Err(PeerError::PairingRequired(peer.pairing_code.clone()));
         }
@@ -93,52 +105,46 @@ impl PeerRuntime {
             channel.remote_static(),
         )?;
 
-        let local = self.snapshot()?;
+        send_scope(&mut channel, &selection)?;
+        let local = self.snapshot(&selection)?;
         send_snapshot(&mut channel, &local)?;
         let remote = receive_snapshot(&mut channel)?;
         let mut summary = SyncSummary::default();
-        if file_sync_enabled() {
-            for (local_record, remote_record) in
-                PeerStorage::winners(&local.records, &remote.records)
-            {
-                match winner(&local_record, &remote_record) {
-                    Winner::Remote(record) => {
-                        if record.deleted {
-                            self.storage.apply_tombstone(record)?;
-                            summary.deleted += 1;
-                        } else {
-                            pull(&mut channel, &self.storage, &self.status, record)?;
-                            summary.received += 1;
-                        }
+        for (local_record, remote_record) in PeerStorage::winners(&local.records, &remote.records) {
+            match winner(&local_record, &remote_record) {
+                Winner::Remote(record) => {
+                    if record.deleted {
+                        self.storage.apply_tombstone(record)?;
+                        summary.deleted += 1;
+                    } else {
+                        pull(&mut channel, &self.storage, &self.status, record)?;
+                        summary.received += 1;
                     }
-                    Winner::Local(record) => {
-                        push(&mut channel, &self.storage, &self.status, record)?;
-                        if record.deleted {
-                            summary.deleted += 1;
-                        } else {
-                            summary.sent += 1;
-                        }
-                    }
-                    Winner::Equal => {}
                 }
+                Winner::Local(record) => {
+                    push(&mut channel, &self.storage, &self.status, record)?;
+                    if record.deleted {
+                        summary.deleted += 1;
+                    } else {
+                        summary.sent += 1;
+                    }
+                }
+                Winner::Equal => {}
             }
-        } else if !remote.records.is_empty() {
-            self.status.message("已忽略对方书籍文件，仅同步阅读进度");
         }
-        let merged = merge_reading(&local.reading, &remote.reading)?;
-        send_reading(&mut channel, &merged)?;
-        expect_applied(channel.receive()?)?;
-        self.reading.import(&merged)?;
+        if selection.contains(SyncItem::Koreader) {
+            let merged = merge_reading(&local.reading, &remote.reading)?;
+            send_reading(&mut channel, &merged)?;
+            expect_applied(channel.receive()?)?;
+            self.reading.import(&merged)?;
+        }
         channel.send(&Wire::Done)?;
         expect_done(channel.receive()?)?;
-        if file_sync_enabled() {
-            self.status.message(&format!(
-                "同步完成：接收 {}，发送 {}，删除 {}",
-                summary.received, summary.sent, summary.deleted
-            ));
-        } else {
-            self.status.message("阅读进度同步完成");
-        }
+        let items = selection.summaries().join("、");
+        self.status.message(&format!(
+            "同步完成：{}；接收 {}，发送 {}，删除 {}",
+            items, summary.received, summary.sent, summary.deleted
+        ));
         Ok(summary)
     }
 
@@ -154,10 +160,14 @@ impl PeerRuntime {
             channel.remote_static(),
         )?;
         send_hello(&mut channel, self.catalog.identity())?;
+        let selection = receive_scope(&mut channel)?;
+        if !selection.any() {
+            return Err(PeerError::EmptySelection);
+        }
         let remote = receive_snapshot(&mut channel)?;
-        let local = self.snapshot()?;
+        let local = self.snapshot(&selection)?;
         send_snapshot(&mut channel, &local)?;
-        self.serve_commands(&mut channel, &remote.reading)?;
+        self.serve_commands(&mut channel, &remote.reading, &selection)?;
         self.status.message(&format!("已与 {remote_name} 完成同步"));
         Ok(())
     }
@@ -166,14 +176,11 @@ impl PeerRuntime {
         &self,
         channel: &mut NoiseChannel,
         remote_reading: &[u8],
+        selection: &SyncSelection,
     ) -> Result<(), PeerError> {
         loop {
             match channel.receive()? {
-                Wire::Get { .. } | Wire::PutStart(_) if !file_sync_enabled() => {
-                    reject_file_sync(channel)?;
-                    return Err(PeerError::FileSyncDisabled);
-                }
-                Wire::Get { kind, path } => {
+                Wire::Get { kind, path } if self.storage.kind_in_scope(&kind, selection) => {
                     let record = self
                         .catalog
                         .find(&kind, &path)?
@@ -181,19 +188,25 @@ impl PeerRuntime {
                         .ok_or(PeerError::MissingObject)?;
                     send_file(channel, &self.storage, &self.status, &record)?;
                 }
-                Wire::PutStart(record) if record.deleted => {
+                Wire::PutStart(record)
+                    if record.deleted && self.storage.kind_in_scope(&record.kind, selection) =>
+                {
                     self.storage.apply_tombstone(&record)?;
                     channel.send(&Wire::Applied)?;
                 }
-                Wire::PutStart(record) => {
+                Wire::PutStart(record) if self.storage.kind_in_scope(&record.kind, selection) => {
                     receive_file(channel, &self.storage, &self.status, record)?
                 }
-                Wire::ReadingStart(length) => {
+                Wire::ReadingStart(length) if selection.contains(SyncItem::Koreader) => {
                     let received = receive_blob(channel, length)?;
                     let merged = merge_reading(&self.reading.export()?, remote_reading)?;
                     let final_state = merge_reading(&merged, &received)?;
                     self.reading.import(&final_state)?;
                     channel.send(&Wire::Applied)?;
+                }
+                Wire::Get { .. } | Wire::PutStart(_) | Wire::ReadingStart(_) => {
+                    channel.send(&Wire::Error("同步项未被本次会话选中".into()))?;
+                    return Err(ProtocolError::Unexpected.into());
                 }
                 Wire::Done => {
                     channel.send(&Wire::Done)?;
@@ -205,14 +218,23 @@ impl PeerRuntime {
         }
     }
 
-    fn snapshot(&self) -> Result<Snapshot, PeerError> {
-        let records = if file_sync_enabled() {
-            self.storage.scan()?
+    fn snapshot(&self, selection: &SyncSelection) -> Result<Snapshot, PeerError> {
+        self.quiesce(selection)?;
+        let reading = if selection.contains(SyncItem::Koreader) {
+            self.reading.export()?
         } else {
             Vec::new()
         };
-        let reading = self.reading.export()?;
+        let records = self.storage.scan(selection)?;
         Ok(Snapshot { records, reading })
+    }
+
+    fn quiesce(&self, selection: &SyncSelection) -> Result<(), PeerError> {
+        if selection.contains(SyncItem::Magicpaper) {
+            self.status.message("正在关闭 MagicPaper 后台服务");
+            self.control.close_complete("magicpaper")?;
+        }
+        Ok(())
     }
 
     fn authenticate(
@@ -249,43 +271,6 @@ impl PeerRuntime {
     }
 }
 
-fn file_sync_enabled() -> bool {
-    file_sync_enabled_from(std::env::var_os(FILE_SYNC_ENV))
-}
-
-fn file_sync_enabled_from(value: Option<OsString>) -> bool {
-    value.is_some()
-}
-
-fn reject_file_sync(channel: &mut NoiseChannel) -> Result<(), PeerError> {
-    channel.send(&Wire::Error(FILE_SYNC_DISABLED_MESSAGE.into()))?;
-    Ok(())
-}
-
-#[derive(Default, Debug, Eq, PartialEq)]
-pub struct SyncSummary {
-    pub received: usize,
-    pub sent: usize,
-    pub deleted: usize,
-}
-
-enum Winner<'a> {
-    Local(&'a ObjectRecord),
-    Remote(&'a ObjectRecord),
-    Equal,
-}
-
-fn winner<'a>(local: &'a Option<ObjectRecord>, remote: &'a Option<ObjectRecord>) -> Winner<'a> {
-    match (local, remote) {
-        (Some(local), Some(remote)) if local.version > remote.version => Winner::Local(local),
-        (Some(local), Some(remote)) if remote.version > local.version => Winner::Remote(remote),
-        (Some(_), Some(_)) => Winner::Equal,
-        (Some(local), None) => Winner::Local(local),
-        (None, Some(remote)) => Winner::Remote(remote),
-        (None, None) => Winner::Equal,
-    }
-}
-
 fn send_hello(channel: &mut NoiseChannel, identity: &DeviceIdentity) -> Result<(), PeerError> {
     channel.send(&Wire::Hello {
         schema: protocol::PROTOCOL_SCHEMA,
@@ -294,6 +279,18 @@ fn send_hello(channel: &mut NoiseChannel, identity: &DeviceIdentity) -> Result<(
         time_ms: now_ms(),
     })?;
     Ok(())
+}
+
+fn send_scope(channel: &mut NoiseChannel, selection: &SyncSelection) -> Result<(), PeerError> {
+    channel.send(&Wire::Scope(selection.clone()))?;
+    Ok(())
+}
+
+fn receive_scope(channel: &mut NoiseChannel) -> Result<SyncSelection, PeerError> {
+    match channel.receive()? {
+        Wire::Scope(selection) => Ok(selection),
+        _ => Err(ProtocolError::Unexpected.into()),
+    }
 }
 
 fn send_snapshot(channel: &mut NoiseChannel, snapshot: &Snapshot) -> Result<(), PeerError> {
@@ -499,16 +496,5 @@ struct ActiveGuard<'a>(&'a AtomicBool);
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_sync_is_opt_in() {
-        assert!(!file_sync_enabled_from(None));
-        assert!(file_sync_enabled_from(Some(OsString::from("1"))));
     }
 }

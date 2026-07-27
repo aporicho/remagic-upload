@@ -2,6 +2,7 @@ use crate::auth::Credentials;
 use crate::network::local_urls;
 use crate::peer::{DiscoveryService, PeerRuntime};
 use crate::server::{ServerConfig, ServerHandle, SharedStatus, StatusSnapshot};
+use crate::sync_scope::{SyncItem, SyncSelection};
 use crate::ui::{ScreenModel, UploadUi};
 use crate::upload::UploadRegistry;
 use crate::{catalog::Catalog, peer::DiscoveredPeer};
@@ -57,8 +58,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         Arc::clone(&catalog),
         storage,
         reading,
+        crate::peer::control::ControlClient::new(environment.control_socket.clone()),
         Arc::clone(&status),
     ));
+    let sync_selection = SyncSelection::load_or_default(&environment.data_home);
     let mut state = AppState {
         bind,
         books_dir,
@@ -76,6 +79,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         foreground: false,
         refresh_pressed: false,
         sync_pressed: false,
+        item_pressed: None,
+        sync_selection,
         primary_touch: None,
         frame_sequence: 0,
         last_snapshot: None,
@@ -121,6 +126,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         } else if ui.sync_button.contains(event.x, event.y) {
                             state.sync_pressed = true;
                             render(&mut state, &mut ui, &mut qtfb, Damage::Button)?;
+                        } else if let Some(item) = ui.sync_item_at(event.x, event.y) {
+                            state.item_pressed = Some(item);
+                            render(&mut state, &mut ui, &mut qtfb, Damage::Status)?;
                         }
                     }
                     TouchPhase::Release if state.primary_touch == Some(event.finger) => {
@@ -128,14 +136,24 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                             state.refresh_pressed && ui.refresh_button.contains(event.x, event.y);
                         let activate_sync =
                             state.sync_pressed && ui.sync_button.contains(event.x, event.y);
+                        let activate_item = state
+                            .item_pressed
+                            .filter(|item| ui.sync_item_contains(*item, event.x, event.y));
+                        let had_item_press = state.item_pressed.is_some();
                         state.primary_touch = None;
                         state.refresh_pressed = false;
                         state.sync_pressed = false;
+                        state.item_pressed = None;
                         if activate {
                             state.rotate_server()?;
                             render(&mut state, &mut ui, &mut qtfb, Damage::All)?;
                         } else if activate_sync {
                             state.activate_sync();
+                            render(&mut state, &mut ui, &mut qtfb, Damage::Status)?;
+                        } else if let Some(item) = activate_item {
+                            state.toggle_sync_item(item);
+                            render(&mut state, &mut ui, &mut qtfb, Damage::Status)?;
+                        } else if had_item_press {
                             render(&mut state, &mut ui, &mut qtfb, Damage::Status)?;
                         } else {
                             render(&mut state, &mut ui, &mut qtfb, Damage::Button)?;
@@ -176,6 +194,8 @@ struct AppState {
     foreground: bool,
     refresh_pressed: bool,
     sync_pressed: bool,
+    item_pressed: Option<SyncItem>,
+    sync_selection: SyncSelection,
     primary_touch: Option<i32>,
     frame_sequence: u64,
     last_snapshot: Option<StatusSnapshot>,
@@ -227,6 +247,7 @@ impl AppState {
         self.primary_touch = None;
         self.refresh_pressed = false;
         self.sync_pressed = false;
+        self.item_pressed = None;
         self.discovery = None;
         self.peers.clear();
         self.credentials = None;
@@ -253,7 +274,11 @@ impl AppState {
 
     fn activate_sync(&mut self) {
         if self.sync_worker.is_some() {
-            self.status.message("阅读进度同步正在进行");
+            self.status.message("设备同步正在进行");
+            return;
+        }
+        if !self.sync_selection.any() {
+            self.status.message("请至少选择一个同步项");
             return;
         }
         let Some(peer) = self.peers.first().cloned() else {
@@ -269,14 +294,23 @@ impl AppState {
             Ok(true) => {
                 let runtime = Arc::clone(&self.peer_runtime);
                 let status = Arc::clone(&self.status);
+                let selection = self.sync_selection.clone();
                 self.sync_worker = Some(std::thread::spawn(move || {
-                    if let Err(error) = runtime.synchronize(&peer) {
+                    if let Err(error) = runtime.synchronize(&peer, selection) {
                         eprintln!("remagic-upload: peer sync failed: {error}");
                         status.message(&format!("同步失败：{}", error.user_message()));
                     }
                 }));
             }
             Err(error) => self.status.message(&format!("无法检查配对状态：{error}")),
+        }
+    }
+
+    fn toggle_sync_item(&mut self, item: SyncItem) {
+        self.sync_selection.toggle(item);
+        if let Err(error) = self.sync_selection.save(&self.data_home) {
+            eprintln!("remagic-upload: could not save sync settings: {error}");
+            self.status.message(&format!("同步项保存失败：{error}"));
         }
     }
 
@@ -324,6 +358,8 @@ fn render(
             status: &snapshot,
             refresh_pressed: state.refresh_pressed,
             sync_pressed: state.sync_pressed,
+            item_pressed: state.item_pressed,
+            sync_selection: &state.sync_selection,
             peer: state.peers.first(),
             peer_trusted: state
                 .peers

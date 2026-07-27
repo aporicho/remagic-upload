@@ -1,3 +1,4 @@
+use super::control::ControlError;
 use super::noise::NoiseError;
 use super::protocol::ProtocolError;
 use super::reading::ReadingError;
@@ -16,8 +17,8 @@ pub enum PeerError {
     NoAddress,
     #[error("同步对象不存在")]
     MissingObject,
-    #[error("此版本默认只同步 KOReader 阅读进度，未传输书籍文件")]
-    FileSyncDisabled,
+    #[error("未选择任何同步项")]
+    EmptySelection,
     #[error("对端拒绝同步：{0}")]
     Remote(String),
     #[error(transparent)]
@@ -32,6 +33,8 @@ pub enum PeerError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Reading(#[from] ReadingError),
+    #[error(transparent)]
+    Control(#[from] ControlError),
 }
 
 impl PeerError {

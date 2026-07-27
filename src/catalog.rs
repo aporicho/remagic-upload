@@ -1,19 +1,22 @@
-use blake3::Hasher;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::fs::{self, File};
-use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod files;
 mod identity;
 #[cfg(test)]
 mod tests;
 mod validate;
 
+#[cfg(test)]
+use files::supported_object_path;
+use files::{collect_files, file_mode, hash_file, modified_ms, normalized_relative};
 use identity::load_or_create_identity;
 use validate::{create_private_directory, validate_kind, validate_peer, validate_record};
 
@@ -54,6 +57,7 @@ pub struct ObjectRecord {
     pub path: String,
     pub size: u64,
     pub hash: String,
+    pub mode: u32,
     pub version: VersionStamp,
     pub deleted: bool,
 }
@@ -88,6 +92,7 @@ impl Catalog {
                path TEXT NOT NULL,
                size INTEGER NOT NULL,
                hash TEXT NOT NULL,
+               mode INTEGER NOT NULL DEFAULT 420,
                mtime_ms INTEGER NOT NULL,
                wall_time_ms INTEGER NOT NULL,
                counter INTEGER NOT NULL,
@@ -112,6 +117,7 @@ impl Catalog {
              );
              COMMIT;",
         )?;
+        ensure_object_mode_column(&connection)?;
         let identity = load_or_create_identity(&mut connection, device_name)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -136,29 +142,52 @@ impl Catalog {
         })
     }
 
+    #[cfg(test)]
     pub fn scan(&self, kind: &str, root: &Path) -> Result<Vec<ObjectRecord>, CatalogError> {
+        self.scan_filtered(kind, root, |relative| supported_object_path(kind, relative))
+    }
+
+    pub fn scan_filtered<F>(
+        &self,
+        kind: &str,
+        root: &Path,
+        accepts: F,
+    ) -> Result<Vec<ObjectRecord>, CatalogError>
+    where
+        F: Fn(&str) -> bool,
+    {
         validate_kind(kind)?;
         let mut files = Vec::new();
-        collect_files(root, root, &mut files)?;
-        files.retain(|(relative, _, _)| supported_object_path(kind, relative));
+        match fs::symlink_metadata(root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CatalogError::UnsafeFile(root.to_path_buf()));
+            }
+            Ok(_) => collect_files(root, root, &mut files)?,
+        }
+        files.retain(|(relative, _, _)| accepts(relative));
         let mut connection = self.connection.lock().map_err(|_| CatalogError::Poisoned)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut seen = std::collections::BTreeSet::new();
         for (relative, absolute, metadata) in files {
             seen.insert(relative.clone());
             let size = metadata.len();
+            let mode = file_mode(&metadata);
             let mtime_ms = modified_ms(&metadata);
             let existing = select_object(&transaction, kind, &relative)?;
             if existing.as_ref().is_some_and(|record| {
-                !record.object.deleted && record.object.size == size && record.mtime_ms == mtime_ms
+                !record.object.deleted
+                    && record.object.size == size
+                    && record.object.mode == mode
+                    && record.mtime_ms == mtime_ms
             }) {
                 continue;
             }
             let hash = hash_file(&absolute)?;
-            if existing
-                .as_ref()
-                .is_some_and(|record| !record.object.deleted && record.object.hash == hash)
-            {
+            if existing.as_ref().is_some_and(|record| {
+                !record.object.deleted && record.object.hash == hash && record.object.mode == mode
+            }) {
                 let object = existing.expect("checked");
                 upsert_object(&transaction, &object.object, mtime_ms)?;
                 continue;
@@ -171,6 +200,7 @@ impl Catalog {
                     path: relative,
                     size,
                     hash,
+                    mode,
                     version,
                     deleted: false,
                 },
@@ -180,7 +210,7 @@ impl Catalog {
 
         let live_paths = list_kind(&transaction, kind)?
             .into_iter()
-            .filter(|record| !record.deleted && supported_object_path(kind, &record.path))
+            .filter(|record| !record.deleted && accepts(&record.path))
             .map(|record| record.path)
             .collect::<Vec<_>>();
         for path in live_paths {
@@ -197,6 +227,7 @@ impl Catalog {
                     path,
                     size: previous.object.size,
                     hash: previous.object.hash,
+                    mode: previous.object.mode,
                     version,
                     deleted: true,
                 },
@@ -205,7 +236,7 @@ impl Catalog {
         }
         let records = list_kind(&transaction, kind)?
             .into_iter()
-            .filter(|record| supported_object_path(kind, &record.path))
+            .filter(|record| accepts(&record.path))
             .collect();
         transaction.commit()?;
         Ok(records)
@@ -227,6 +258,7 @@ impl Catalog {
             path: relative,
             size: metadata.len(),
             hash: hash_file(path)?,
+            mode: file_mode(&metadata),
             version: self.next_version()?,
             deleted: false,
         };
@@ -304,6 +336,20 @@ fn set_meta(connection: &Connection, key: &str, value: &[u8]) -> Result<(), rusq
     Ok(())
 }
 
+fn ensure_object_mode_column(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(objects)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "mode") {
+        connection.execute(
+            "ALTER TABLE objects ADD COLUMN mode INTEGER NOT NULL DEFAULT 420",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn next_version_in(
     connection: &Connection,
     origin: &str,
@@ -325,13 +371,13 @@ fn select_object(
 ) -> Result<Option<StoredObject>, rusqlite::Error> {
     connection
         .query_row(
-            "SELECT kind,path,size,hash,wall_time_ms,counter,origin,deleted,mtime_ms
+            "SELECT kind,path,size,hash,mode,wall_time_ms,counter,origin,deleted,mtime_ms
              FROM objects WHERE kind=?1 AND path=?2",
             params![kind, path],
             |row| {
                 Ok(StoredObject {
                     object: row_object(row)?,
-                    mtime_ms: row.get(8)?,
+                    mtime_ms: row.get(9)?,
                 })
             },
         )
@@ -344,18 +390,19 @@ fn row_object(row: &rusqlite::Row<'_>) -> Result<ObjectRecord, rusqlite::Error> 
         path: row.get(1)?,
         size: row.get::<_, i64>(2)? as u64,
         hash: row.get(3)?,
+        mode: row.get::<_, i64>(4)? as u32,
         version: VersionStamp {
-            wall_time_ms: row.get(4)?,
-            counter: row.get::<_, i64>(5)? as u64,
-            origin: row.get(6)?,
+            wall_time_ms: row.get(5)?,
+            counter: row.get::<_, i64>(6)? as u64,
+            origin: row.get(7)?,
         },
-        deleted: row.get::<_, i64>(7)? != 0,
+        deleted: row.get::<_, i64>(8)? != 0,
     })
 }
 
 fn list_kind(connection: &Connection, kind: &str) -> Result<Vec<ObjectRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT kind,path,size,hash,wall_time_ms,counter,origin,deleted
+        "SELECT kind,path,size,hash,mode,wall_time_ms,counter,origin,deleted
          FROM objects WHERE kind=?1 ORDER BY path",
     )?;
     let records = statement
@@ -370,16 +417,17 @@ fn upsert_object(
     mtime_ms: i64,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
-        "INSERT INTO objects(kind,path,size,hash,mtime_ms,wall_time_ms,counter,origin,deleted)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        "INSERT INTO objects(kind,path,size,hash,mode,mtime_ms,wall_time_ms,counter,origin,deleted)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
          ON CONFLICT(kind,path) DO UPDATE SET size=excluded.size,hash=excluded.hash,
-           mtime_ms=excluded.mtime_ms,wall_time_ms=excluded.wall_time_ms,
+           mode=excluded.mode,mtime_ms=excluded.mtime_ms,wall_time_ms=excluded.wall_time_ms,
            counter=excluded.counter,origin=excluded.origin,deleted=excluded.deleted",
         params![
             record.kind,
             record.path,
             record.size as i64,
             record.hash,
+            record.mode as i64,
             mtime_ms,
             record.version.wall_time_ms,
             record.version.counter as i64,
@@ -388,98 +436,6 @@ fn upsert_object(
         ],
     )?;
     Ok(())
-}
-
-fn collect_files(
-    root: &Path,
-    directory: &Path,
-    output: &mut Vec<(String, PathBuf, fs::Metadata)>,
-) -> Result<(), CatalogError> {
-    let metadata = fs::symlink_metadata(directory)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CatalogError::UnsafeFile(directory.to_path_buf()));
-    }
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with(".remagic-") {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            collect_files(root, &path, output)?;
-        } else if metadata.is_file() {
-            output.push((normalized_relative(root, &path)?, path, metadata));
-        }
-    }
-    Ok(())
-}
-
-fn normalized_relative(root: &Path, path: &Path) -> Result<String, CatalogError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| CatalogError::UnsafeFile(path.to_path_buf()))?;
-    if relative.as_os_str().is_empty()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir
-                    | Component::CurDir
-                    | Component::RootDir
-                    | Component::Prefix(_)
-            )
-        })
-    {
-        return Err(CatalogError::UnsafeFile(path.to_path_buf()));
-    }
-    relative
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| CatalogError::UnsafeFile(path.to_path_buf()))
-}
-
-fn supported_object_path(kind: &str, path: &str) -> bool {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match kind {
-        "book" => matches!(
-            extension.as_str(),
-            "pdf" | "djvu" | "djv" | "mobi" | "azw3" | "fb2" | "epub" | "cbz" | "cbr" | "txt"
-        ),
-        "wallpaper" => extension == "png",
-        _ => false,
-    }
-}
-
-fn hash_file(path: &Path) -> Result<String, io::Error> {
-    let mut input = File::open(path)?;
-    let mut hasher = Hasher::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn modified_ms(metadata: &fs::Metadata) -> i64 {
-    metadata
-        .modified()
-        .unwrap_or(UNIX_EPOCH)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
 }
 
 pub fn now_ms() -> i64 {

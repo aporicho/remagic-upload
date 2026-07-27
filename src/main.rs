@@ -4,6 +4,7 @@ mod catalog;
 mod network;
 mod peer;
 mod server;
+mod sync_scope;
 mod trash;
 mod ui;
 mod upload;
