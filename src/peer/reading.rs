@@ -14,17 +14,69 @@ const READING_FIELDS: [&str; 4] = [
     "percent_finished",
     "bookmarks",
 ];
-const FONT_SIZE_FIELDS: [&str; 2] = ["copt_font_size", "kopt_font_size"];
+const DOCUMENT_SETTING_FIELDS: [&str; 51] = [
+    "font_face",
+    "font_family_fonts",
+    "css",
+    "style_tweaks",
+    "copt_font_size",
+    "copt_line_spacing",
+    "copt_word_spacing",
+    "copt_word_expansion",
+    "copt_h_page_margins",
+    "copt_t_page_margin",
+    "copt_b_page_margin",
+    "copt_sync_t_b_page_margins",
+    "copt_font_base_weight",
+    "copt_font_hinting",
+    "copt_font_kerning",
+    "copt_font_gamma",
+    "copt_embedded_fonts",
+    "copt_embedded_css",
+    "copt_block_rendering_mode",
+    "copt_page_scroll",
+    "copt_rotation_mode",
+    "copt_visible_pages",
+    "copt_smooth_scaling",
+    "copt_nightmode_images",
+    "copt_render_dpi",
+    "copt_writing_direction",
+    "kopt_font_size",
+    "kopt_text_wrap",
+    "kopt_line_spacing",
+    "kopt_word_spacing",
+    "kopt_page_margin",
+    "kopt_trim_page",
+    "kopt_zoom_factor",
+    "kopt_zoom_mode_genus",
+    "kopt_zoom_mode_type",
+    "kopt_zoom_direction",
+    "kopt_zoom_range_number",
+    "kopt_zoom_overlap_h",
+    "kopt_zoom_overlap_v",
+    "kopt_contrast",
+    "kopt_quality",
+    "kopt_page_opt",
+    "kopt_rotation_mode",
+    "kopt_page_scroll",
+    "kopt_page_gap_height",
+    "kopt_doc_language",
+    "kopt_forced_ocr",
+    "kopt_max_columns",
+    "kopt_justification",
+    "kopt_writing_direction",
+    "kopt_auto_straighten",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReadingScope {
     pub reading: bool,
-    pub font_size: bool,
+    pub document_settings: bool,
 }
 
 impl ReadingScope {
     pub fn any(self) -> bool {
-        self.reading || self.font_size
+        self.reading || self.document_settings
     }
 }
 
@@ -174,16 +226,13 @@ fn scoped_payload(bytes: &[u8], scope: ReadingScope) -> Result<Vec<u8>, ReadingE
     let mut books = validate_payload(bytes)?;
     for record in &mut books {
         if let Some(object) = record.as_object_mut() {
-            if !scope.reading {
-                for field in READING_FIELDS {
-                    object.remove(field);
-                }
-            }
-            if !scope.font_size {
-                for field in FONT_SIZE_FIELDS {
-                    object.remove(field);
-                }
-            }
+            object.retain(|field, _| {
+                field == "path"
+                    || field == "updated_at"
+                    || (scope.reading && READING_FIELDS.contains(&field.as_str()))
+                    || (scope.document_settings
+                        && DOCUMENT_SETTING_FIELDS.contains(&field.as_str()))
+            });
         }
     }
     Ok(serde_json::to_vec(&serde_json::json!({
@@ -239,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_does_not_create_bookmarks_for_font_size_only_records() {
+    fn merge_does_not_create_bookmarks_for_document_settings_only_records() {
         let left = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":1,"copt_font_size":22}]}"#;
         let right = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"copt_font_size":26}]}"#;
         let merged: Value = serde_json::from_slice(&merge(left, right).unwrap()).unwrap();
@@ -249,14 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn scope_can_keep_reading_without_font_size() {
-        let payload = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"last_page":7,"bookmarks":[{"page":1}],"copt_font_size":26,"kopt_font_size":1}]}"#;
+    fn scope_can_keep_reading_without_document_settings() {
+        let payload = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"last_page":7,"bookmarks":[{"page":1}],"copt_font_size":26,"kopt_font_size":1,"cache_file_path":"x"}]}"#;
         let scoped: Value = serde_json::from_slice(
             &scoped_payload(
                 payload,
                 ReadingScope {
                     reading: true,
-                    font_size: false,
+                    document_settings: false,
                 },
             )
             .unwrap(),
@@ -267,17 +316,18 @@ mod tests {
         assert!(book.contains_key("bookmarks"));
         assert!(!book.contains_key("copt_font_size"));
         assert!(!book.contains_key("kopt_font_size"));
+        assert!(!book.contains_key("cache_file_path"));
     }
 
     #[test]
-    fn scope_can_keep_font_size_without_reading() {
-        let payload = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"last_page":7,"bookmarks":[{"page":1}],"copt_font_size":26,"kopt_font_size":1}]}"#;
+    fn scope_can_keep_document_settings_without_reading() {
+        let payload = br#"{"schema":1,"books":[{"path":"/home/root/books/a.epub","updated_at":2,"last_page":7,"bookmarks":[{"page":1}],"font_face":"Noto Serif CJK SC","copt_font_size":26,"copt_h_page_margins":[12,12],"kopt_font_size":1,"kopt_zoom_factor":1.5,"cache_file_path":"x"}]}"#;
         let scoped: Value = serde_json::from_slice(
             &scoped_payload(
                 payload,
                 ReadingScope {
                     reading: false,
-                    font_size: true,
+                    document_settings: true,
                 },
             )
             .unwrap(),
@@ -286,8 +336,18 @@ mod tests {
         let book = scoped["books"][0].as_object().unwrap();
         assert!(!book.contains_key("last_page"));
         assert!(!book.contains_key("bookmarks"));
+        assert_eq!(
+            book.get("font_face"),
+            Some(&serde_json::json!("Noto Serif CJK SC"))
+        );
         assert_eq!(book.get("copt_font_size"), Some(&serde_json::json!(26)));
+        assert_eq!(
+            book.get("copt_h_page_margins"),
+            Some(&serde_json::json!([12, 12]))
+        );
         assert_eq!(book.get("kopt_font_size"), Some(&serde_json::json!(1)));
+        assert_eq!(book.get("kopt_zoom_factor"), Some(&serde_json::json!(1.5)));
+        assert!(!book.contains_key("cache_file_path"));
     }
 
     #[test]

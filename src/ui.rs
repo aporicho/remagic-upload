@@ -9,6 +9,9 @@ use crate::peer::DiscoveredPeer;
 use crate::server::StatusSnapshot;
 use crate::sync_scope::{SyncItem, SyncSelection};
 
+mod status_text;
+use status_text::{status_bar_ratio, status_detail_lines, status_title};
+
 const UI_FONT: &str = "/home/root/apps/remagic/fonts/UIFont.ttf";
 const GRAY: Rgb565 = 0x8410;
 
@@ -179,13 +182,7 @@ impl UploadUi {
         } else {
             (height as f32 * 0.62) as usize
         };
-        let status_title = if model.status.active && model.status.total > 0 {
-            format!("正在上传：{}", model.status.filename)
-        } else if model.status.active {
-            format!("{}：{}", model.status.message, model.status.filename)
-        } else {
-            model.status.message.clone()
-        };
+        let status_title = status_title(model.status);
         self.text_fit(
             surface,
             &status_title,
@@ -202,9 +199,7 @@ impl UploadUi {
             (8.0 * unit) as usize,
             0xd69a,
         );
-        if model.status.total > 0 {
-            let ratio =
-                model.status.received.min(model.status.total) as f64 / model.status.total as f64;
+        if let Some(ratio) = status_bar_ratio(model.status) {
             surface.fill_rect(
                 margin,
                 bar_y,
@@ -213,15 +208,18 @@ impl UploadUi {
                 BLACK,
             );
         }
-        if let Some(recent) = model.status.recent.first() {
+        let detail_lines = status_detail_lines(model.status);
+        let mut detail_y = bar_y as f32 + 30.0 * unit;
+        for line in detail_lines.iter().take(3) {
             self.text_fit(
                 surface,
-                &format!("最近：{}　{}", recent.filename, recent.message),
-                (margin as f32, bar_y as f32 + 30.0 * unit),
+                line,
+                (margin as f32, detail_y),
                 width.saturating_sub(margin * 2) as f32,
                 24.0 * unit,
                 GRAY,
             );
+            detail_y += 32.0 * unit;
         }
 
         let peer_text = match model.peer {
@@ -232,13 +230,13 @@ impl UploadUi {
         self.text_fit(
             surface,
             &peer_text,
-            (margin as f32, bar_y as f32 + 66.0 * unit),
+            (margin as f32, detail_y + 4.0 * unit),
             width.saturating_sub(margin * 2) as f32,
             24.0 * unit,
             GRAY,
         );
 
-        let options_y = bar_y.saturating_add((111.0 * unit) as usize);
+        let options_y = (detail_y + 49.0 * unit) as usize;
         self.text(
             surface,
             "同步项",

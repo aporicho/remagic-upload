@@ -1,3 +1,4 @@
+use super::protocol::{clean_label, RecordKey};
 use crate::catalog::{Catalog, ObjectRecord};
 use crate::sync_scope::SyncSelection;
 use crate::trash::Trash;
@@ -60,6 +61,27 @@ impl PeerStorage {
             );
         }
         Ok(records)
+    }
+
+    pub fn labels(&self, records: &[ObjectRecord]) -> BTreeMap<RecordKey, String> {
+        records
+            .iter()
+            .map(|record| {
+                (
+                    (record.kind.clone(), record.path.clone()),
+                    self.display_label(record),
+                )
+            })
+            .collect()
+    }
+
+    pub fn display_label(&self, record: &ObjectRecord) -> String {
+        if record.kind == "xochitl_document" {
+            if let Some(label) = xochitl_label(&self.books, &record.path) {
+                return label;
+            }
+        }
+        clean_label(&record.path).unwrap_or_else(|| record.path.clone())
     }
 
     pub fn open_local(&self, record: &ObjectRecord) -> Result<File, StorageError> {
@@ -232,6 +254,31 @@ impl IncomingFile {
         self.received = next;
         Ok(())
     }
+}
+
+fn xochitl_label(root: &Path, relative: &str) -> Option<String> {
+    let path = Path::new(relative);
+    if path.components().count() != 1 {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    if !is_uuid(stem) {
+        return None;
+    }
+    let suffix = path.extension()?.to_str()?;
+    let metadata = fs::read(root.join(format!("{stem}.metadata"))).ok()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&metadata).ok()?;
+    let visible_name = value.get("visibleName")?.as_str()?;
+    let title = clean_label(visible_name)?;
+    clean_label(&format!("{title}.{suffix}"))
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
 }
 
 fn validate_record_path(record: &ObjectRecord) -> Result<(), StorageError> {

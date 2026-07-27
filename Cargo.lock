@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "remagic-upload"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "ab_glyph",
  "bincode",

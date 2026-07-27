@@ -10,7 +10,7 @@ const SETTINGS_FILE: &str = "sync-settings.json";
 pub enum SyncItem {
     Books,
     Koreader,
-    KoreaderFontSize,
+    KoreaderDocumentSettings,
     Magicpaper,
     Wallpapers,
     AiKeys,
@@ -20,7 +20,7 @@ impl SyncItem {
     pub const ALL: [SyncItem; 6] = [
         SyncItem::Books,
         SyncItem::Koreader,
-        SyncItem::KoreaderFontSize,
+        SyncItem::KoreaderDocumentSettings,
         SyncItem::Magicpaper,
         SyncItem::Wallpapers,
         SyncItem::AiKeys,
@@ -30,7 +30,7 @@ impl SyncItem {
         match self {
             SyncItem::Books => "书籍",
             SyncItem::Koreader => "KOReader",
-            SyncItem::KoreaderFontSize => "字体大小",
+            SyncItem::KoreaderDocumentSettings => "文档设置",
             SyncItem::Magicpaper => "MagicPaper",
             SyncItem::Wallpapers => "壁纸",
             SyncItem::AiKeys => "AI 密钥",
@@ -41,7 +41,7 @@ impl SyncItem {
         match self {
             SyncItem::Books => "书籍",
             SyncItem::Koreader => "KOReader 数据",
-            SyncItem::KoreaderFontSize => "字体大小",
+            SyncItem::KoreaderDocumentSettings => "文档设置",
             SyncItem::Magicpaper => "MagicPaper 数据",
             SyncItem::Wallpapers => "壁纸",
             SyncItem::AiKeys => "AI 密钥",
@@ -55,8 +55,8 @@ pub struct SyncSelection {
     pub books: bool,
     #[serde(default = "enabled")]
     pub koreader: bool,
-    #[serde(default = "disabled")]
-    pub koreader_font_size: bool,
+    #[serde(default = "disabled", alias = "koreader_font_size")]
+    pub koreader_document_settings: bool,
     #[serde(default = "enabled")]
     pub magicpaper: bool,
     #[serde(default = "enabled")]
@@ -70,7 +70,7 @@ impl Default for SyncSelection {
         Self {
             books: true,
             koreader: true,
-            koreader_font_size: false,
+            koreader_document_settings: false,
             magicpaper: true,
             wallpapers: true,
             ai_keys: true,
@@ -99,7 +99,7 @@ impl SyncSelection {
         match item {
             SyncItem::Books => self.books,
             SyncItem::Koreader => self.koreader,
-            SyncItem::KoreaderFontSize => self.koreader_font_size,
+            SyncItem::KoreaderDocumentSettings => self.koreader_document_settings,
             SyncItem::Magicpaper => self.magicpaper,
             SyncItem::Wallpapers => self.wallpapers,
             SyncItem::AiKeys => self.ai_keys,
@@ -110,7 +110,7 @@ impl SyncSelection {
         match item {
             SyncItem::Books => self.books = enabled,
             SyncItem::Koreader => self.koreader = enabled,
-            SyncItem::KoreaderFontSize => self.koreader_font_size = enabled,
+            SyncItem::KoreaderDocumentSettings => self.koreader_document_settings = enabled,
             SyncItem::Magicpaper => self.magicpaper = enabled,
             SyncItem::Wallpapers => self.wallpapers = enabled,
             SyncItem::AiKeys => self.ai_keys = enabled,
@@ -151,11 +151,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_selects_core_items_without_font_size() {
+    fn default_selects_core_items_without_document_settings() {
         let selection = SyncSelection::default();
         assert!(selection.books);
         assert!(selection.koreader);
-        assert!(!selection.koreader_font_size);
+        assert!(!selection.koreader_document_settings);
         assert!(selection.magicpaper);
         assert!(selection.wallpapers);
         assert!(selection.ai_keys);
@@ -167,9 +167,19 @@ mod tests {
         let selection: SyncSelection = serde_json::from_slice(br#"{"books":false}"#).unwrap();
         assert!(!selection.books);
         assert!(selection.koreader);
-        assert!(!selection.koreader_font_size);
+        assert!(!selection.koreader_document_settings);
         assert!(selection.magicpaper);
         assert!(selection.wallpapers);
         assert!(selection.ai_keys);
+    }
+
+    #[test]
+    fn legacy_font_size_setting_enables_document_settings() {
+        let selection: SyncSelection =
+            serde_json::from_slice(br#"{"koreader_font_size":true}"#).unwrap();
+        assert!(selection.koreader_document_settings);
+        let saved = serde_json::to_value(&selection).unwrap();
+        assert_eq!(saved["koreader_document_settings"], true);
+        assert!(saved.get("koreader_font_size").is_none());
     }
 }

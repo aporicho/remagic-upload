@@ -1,15 +1,18 @@
 use crate::catalog::ObjectRecord;
 use crate::sync_scope::SyncSelection;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
-// Wire schema 4 adds a separate KOReader font-size selection.
+// Wire schema 6 renames KOReader font-size sync to document-settings sync.
 // Keep this independent from the on-disk catalog schema: peers may evolve the
 // transport without forcing a local database migration.
-pub const PROTOCOL_SCHEMA: u32 = 4;
+pub const PROTOCOL_SCHEMA: u32 = 6;
 pub const CLOCK_SKEW_LIMIT_MS: i64 = 2 * 60 * 1000;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_READING_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_SNAPSHOT_RECORDS: u32 = 100_000;
+pub const MAX_LABEL_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Wire {
@@ -22,9 +25,11 @@ pub enum Wire {
     Scope(SyncSelection),
     SnapshotStart {
         records: u32,
+        labels: u32,
         reading_bytes: u64,
     },
     Record(ObjectRecord),
+    RecordLabel(RecordLabel),
     Data(Vec<u8>),
     DataAck(u64),
     SnapshotEnd,
@@ -41,10 +46,33 @@ pub enum Wire {
     Error(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecordLabel {
+    pub kind: String,
+    pub path: String,
+    pub label: String,
+}
+
+pub type RecordKey = (String, String);
+
 #[derive(Debug)]
 pub struct Snapshot {
     pub records: Vec<ObjectRecord>,
+    pub labels: BTreeMap<RecordKey, String>,
     pub reading: Vec<u8>,
+}
+
+impl Snapshot {
+    pub fn label_for(&self, record: &ObjectRecord) -> String {
+        self.labels
+            .get(&record_key(record))
+            .cloned()
+            .unwrap_or_else(|| record.path.clone())
+    }
+}
+
+pub fn record_key(record: &ObjectRecord) -> RecordKey {
+    (record.kind.clone(), record.path.clone())
 }
 
 pub fn expect_hello(value: Wire) -> Result<(String, String, i64), ProtocolError> {
@@ -80,6 +108,14 @@ pub fn expect_data_ack(value: Wire, expected: u64) -> Result<(), ProtocolError> 
     }
 }
 
+pub fn clean_label(label: &str) -> Option<String> {
+    if label.len() > MAX_LABEL_BYTES || label.chars().any(char::is_control) {
+        return None;
+    }
+    let trimmed = label.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("peer uses unsupported sync schema {0}")]
@@ -106,5 +142,13 @@ mod tests {
     fn data_ack_must_match_the_exact_committed_offset() {
         assert!(expect_data_ack(Wire::DataAck(32_768), 32_768).is_ok());
         assert!(expect_data_ack(Wire::DataAck(32_767), 32_768).is_err());
+    }
+
+    #[test]
+    fn labels_must_be_short_printable_text() {
+        assert_eq!(clean_label("  论语.epub  ").as_deref(), Some("论语.epub"));
+        assert!(clean_label("").is_none());
+        assert!(clean_label("bad\nlabel").is_none());
+        assert!(clean_label(&"a".repeat(MAX_LABEL_BYTES + 1)).is_none());
     }
 }

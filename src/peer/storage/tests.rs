@@ -112,7 +112,48 @@ fn scan_includes_selected_app_data_without_secret_or_docsettings_leakage() {
 }
 
 #[test]
-fn font_size_selection_does_not_enable_raw_docsettings() {
+fn xochitl_labels_use_visible_name_for_books_and_sidecars() {
+    let root = fixture();
+    let xochitl = root.join(".local/share/remarkable/xochitl");
+    fs::create_dir_all(&xochitl).unwrap();
+    fs::write(
+        xochitl.join("11111111-1111-4111-8111-111111111111.metadata"),
+        r#"{"visibleName":"论语"}"#.as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        xochitl.join("11111111-1111-4111-8111-111111111111.epub"),
+        b"book",
+    )
+    .unwrap();
+
+    let storage = storage(&root);
+    let records = storage.scan(&SyncSelection::default()).unwrap();
+    let labels = storage.labels(&records);
+
+    assert_eq!(
+        labels
+            .get(&(
+                "xochitl_document".to_owned(),
+                "11111111-1111-4111-8111-111111111111.epub".to_owned()
+            ))
+            .map(String::as_str),
+        Some("论语.epub")
+    );
+    assert_eq!(
+        labels
+            .get(&(
+                "xochitl_document".to_owned(),
+                "11111111-1111-4111-8111-111111111111.metadata".to_owned()
+            ))
+            .map(String::as_str),
+        Some("论语.metadata")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn document_settings_selection_does_not_enable_raw_docsettings() {
     let root = fixture();
     let xochitl = root.join(".local/share/remarkable/xochitl");
     fs::create_dir_all(xochitl.join("a.sdr")).unwrap();
@@ -127,7 +168,7 @@ fn font_size_selection_does_not_enable_raw_docsettings() {
     .unwrap();
 
     let mut selection = SyncSelection::default();
-    selection.set(crate::sync_scope::SyncItem::KoreaderFontSize, true);
+    selection.set(crate::sync_scope::SyncItem::KoreaderDocumentSettings, true);
     let storage = storage(&root);
     let records = storage.scan(&selection).unwrap();
     let keys = records

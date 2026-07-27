@@ -2,10 +2,12 @@ pub(crate) mod control;
 mod discovery;
 mod error;
 mod noise;
+mod plan;
 mod protocol;
 pub(crate) mod reading;
 pub(crate) mod storage;
 mod summary;
+mod transfer;
 mod transport;
 
 pub use discovery::{DiscoveredPeer, DiscoveryService};
@@ -13,22 +15,24 @@ pub use error::PeerError;
 pub use noise::MAGIC;
 pub use summary::SyncSummary;
 
-use crate::catalog::{now_ms, Catalog, DeviceIdentity, ObjectRecord, TrustedPeer};
+use crate::catalog::{now_ms, Catalog, DeviceIdentity, TrustedPeer};
 use crate::server::SharedStatus;
 use crate::sync_scope::{SyncItem, SyncSelection};
 use control::ControlClient;
 use discovery::pairing_code;
 use noise::NoiseChannel;
-use protocol::{
-    expect_data_ack, expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES,
-};
+use plan::{SyncDirection, SyncPlan};
+use protocol::{expect_hello, validate_clock, ProtocolError, Snapshot, Wire};
 use reading::{merge as merge_reading, ReadingProvider, ReadingScope};
-use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::PeerStorage;
 use summary::{winner, Winner};
+use transfer::{
+    expect_applied, expect_done, pull, push, receive_blob, receive_file, receive_snapshot,
+    send_file, send_reading, send_snapshot,
+};
 use transport::{configure, connect_any};
 
 pub struct PeerRuntime {
@@ -109,20 +113,38 @@ impl PeerRuntime {
         let local = self.snapshot(&selection)?;
         send_snapshot(&mut channel, &local)?;
         let remote = receive_snapshot(&mut channel)?;
+        let plan = SyncPlan::for_initiator(&local, &remote);
+        self.status.sync_plan(
+            plan.send_files(),
+            plan.receive_files(),
+            plan.delete_files(),
+            plan.total_bytes(),
+            plan.preview(),
+        );
         let mut summary = SyncSummary::default();
         for (local_record, remote_record) in PeerStorage::winners(&local.records, &remote.records) {
             match winner(&local_record, &remote_record) {
                 Winner::Remote(record) => {
                     if record.deleted {
+                        let label = plan.label_for(record, SyncDirection::Delete);
+                        self.status.sync_transfer(&label, 0, "正在删除");
                         self.storage.apply_tombstone(record)?;
+                        self.status.sync_file_done();
                         summary.deleted += 1;
                     } else {
-                        pull(&mut channel, &self.storage, &self.status, record)?;
+                        let label = plan.label_for(record, SyncDirection::Receive);
+                        pull(&mut channel, &self.storage, &self.status, record, &label)?;
                         summary.received += 1;
                     }
                 }
                 Winner::Local(record) => {
-                    push(&mut channel, &self.storage, &self.status, record)?;
+                    let direction = if record.deleted {
+                        SyncDirection::Delete
+                    } else {
+                        SyncDirection::Send
+                    };
+                    let label = plan.label_for(record, direction);
+                    push(&mut channel, &self.storage, &self.status, record, &label)?;
                     if record.deleted {
                         summary.deleted += 1;
                     } else {
@@ -142,7 +164,7 @@ impl PeerRuntime {
         channel.send(&Wire::Done)?;
         expect_done(channel.receive()?)?;
         let items = selection.summaries().join("、");
-        self.status.message(&format!(
+        self.status.sync_complete(&format!(
             "同步完成：{}；接收 {}，发送 {}，删除 {}",
             items, summary.received, summary.sent, summary.deleted
         ));
@@ -168,8 +190,17 @@ impl PeerRuntime {
         let remote = receive_snapshot(&mut channel)?;
         let local = self.snapshot(&selection)?;
         send_snapshot(&mut channel, &local)?;
-        self.serve_commands(&mut channel, &remote.reading, &selection)?;
-        self.status.message(&format!("已与 {remote_name} 完成同步"));
+        let plan = SyncPlan::for_acceptor(&local, &remote);
+        self.status.sync_plan(
+            plan.send_files(),
+            plan.receive_files(),
+            plan.delete_files(),
+            plan.total_bytes(),
+            plan.preview(),
+        );
+        self.serve_commands(&mut channel, &remote.reading, &selection, &plan)?;
+        self.status
+            .sync_complete(&format!("已与 {remote_name} 完成同步"));
         Ok(())
     }
 
@@ -178,6 +209,7 @@ impl PeerRuntime {
         channel: &mut NoiseChannel,
         remote_reading: &[u8],
         selection: &SyncSelection,
+        plan: &SyncPlan,
     ) -> Result<(), PeerError> {
         loop {
             match channel.receive()? {
@@ -187,16 +219,21 @@ impl PeerRuntime {
                         .find(&kind, &path)?
                         .filter(|record| !record.deleted)
                         .ok_or(PeerError::MissingObject)?;
-                    send_file(channel, &self.storage, &self.status, &record)?;
+                    let label = plan.label_for(&record, SyncDirection::Send);
+                    send_file(channel, &self.storage, &self.status, &record, &label)?;
                 }
                 Wire::PutStart(record)
                     if record.deleted && self.storage.kind_in_scope(&record.kind, selection) =>
                 {
+                    let label = plan.label_for(&record, SyncDirection::Delete);
+                    self.status.sync_transfer(&label, 0, "正在删除");
                     self.storage.apply_tombstone(&record)?;
+                    self.status.sync_file_done();
                     channel.send(&Wire::Applied)?;
                 }
                 Wire::PutStart(record) if self.storage.kind_in_scope(&record.kind, selection) => {
-                    receive_file(channel, &self.storage, &self.status, record)?
+                    let label = plan.label_for(&record, SyncDirection::Receive);
+                    receive_file(channel, &self.storage, &self.status, record, &label)?
                 }
                 Wire::ReadingStart(length) if reading_scope(selection).any() => {
                     let received = receive_blob(channel, length)?;
@@ -229,7 +266,12 @@ impl PeerRuntime {
             Vec::new()
         };
         let records = self.storage.scan(selection)?;
-        Ok(Snapshot { records, reading })
+        let labels = self.storage.labels(&records);
+        Ok(Snapshot {
+            records,
+            labels,
+            reading,
+        })
     }
 
     fn quiesce(&self, selection: &SyncSelection) -> Result<(), PeerError> {
@@ -299,206 +341,7 @@ fn receive_scope(channel: &mut NoiseChannel) -> Result<SyncSelection, PeerError>
 fn reading_scope(selection: &SyncSelection) -> ReadingScope {
     ReadingScope {
         reading: selection.contains(SyncItem::Koreader),
-        font_size: selection.contains(SyncItem::KoreaderFontSize),
-    }
-}
-
-fn send_snapshot(channel: &mut NoiseChannel, snapshot: &Snapshot) -> Result<(), PeerError> {
-    channel.send(&Wire::SnapshotStart {
-        records: snapshot
-            .records
-            .len()
-            .try_into()
-            .map_err(|_| ProtocolError::SnapshotTooLarge)?,
-        reading_bytes: snapshot.reading.len() as u64,
-    })?;
-    for record in &snapshot.records {
-        channel.send(&Wire::Record(record.clone()))?;
-    }
-    send_blob(channel, &snapshot.reading)?;
-    channel.send(&Wire::SnapshotEnd)?;
-    Ok(())
-}
-
-fn receive_snapshot(channel: &mut NoiseChannel) -> Result<Snapshot, PeerError> {
-    let (count, reading_bytes) = match channel.receive()? {
-        Wire::SnapshotStart {
-            records,
-            reading_bytes,
-        } if records <= 100_000 && reading_bytes <= protocol::MAX_READING_BYTES as u64 => {
-            (records, reading_bytes)
-        }
-        _ => return Err(ProtocolError::SnapshotTooLarge.into()),
-    };
-    let mut records = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        match channel.receive()? {
-            Wire::Record(record) => records.push(record),
-            _ => return Err(ProtocolError::Unexpected.into()),
-        }
-    }
-    let reading = receive_data(channel, reading_bytes)?;
-    match channel.receive()? {
-        Wire::SnapshotEnd => Ok(Snapshot { records, reading }),
-        _ => Err(ProtocolError::Unexpected.into()),
-    }
-}
-
-fn pull(
-    channel: &mut NoiseChannel,
-    storage: &PeerStorage,
-    status: &SharedStatus,
-    record: &ObjectRecord,
-) -> Result<(), PeerError> {
-    channel.send(&Wire::Get {
-        kind: record.kind.clone(),
-        path: record.path.clone(),
-    })?;
-    match channel.receive()? {
-        Wire::PutStart(received) if received == *record => {
-            receive_file(channel, storage, status, received)
-        }
-        _ => Err(ProtocolError::Unexpected.into()),
-    }
-}
-
-fn push(
-    channel: &mut NoiseChannel,
-    storage: &PeerStorage,
-    status: &SharedStatus,
-    record: &ObjectRecord,
-) -> Result<(), PeerError> {
-    channel.send(&Wire::PutStart(record.clone()))?;
-    if record.deleted {
-        expect_applied(channel.receive()?)
-    } else {
-        send_file_body(channel, storage, status, record)
-    }
-}
-
-fn send_file(
-    channel: &mut NoiseChannel,
-    storage: &PeerStorage,
-    status: &SharedStatus,
-    record: &ObjectRecord,
-) -> Result<(), PeerError> {
-    channel.send(&Wire::PutStart(record.clone()))?;
-    send_file_body(channel, storage, status, record)
-}
-
-fn send_file_body(
-    channel: &mut NoiseChannel,
-    storage: &PeerStorage,
-    status: &SharedStatus,
-    record: &ObjectRecord,
-) -> Result<(), PeerError> {
-    let offset = match channel.receive()? {
-        Wire::Resume(offset) if offset <= record.size => offset,
-        _ => return Err(ProtocolError::Unexpected.into()),
-    };
-    let mut file = storage.open_local(record)?;
-    file.seek(SeekFrom::Start(offset))?;
-    status.transfer(&record.path, record.size, "正在发送");
-    status.progress(offset);
-    let mut sent = offset;
-    let mut buffer = vec![0_u8; CHUNK_BYTES];
-    loop {
-        let size = file.read(&mut buffer)?;
-        if size == 0 {
-            break;
-        }
-        channel.send(&Wire::Data(buffer[..size].to_vec()))?;
-        sent += size as u64;
-        expect_data_ack(channel.receive()?, sent)?;
-        status.progress(sent);
-    }
-    channel.send(&Wire::FileEnd)?;
-    expect_applied(channel.receive()?)
-}
-
-fn receive_file(
-    channel: &mut NoiseChannel,
-    storage: &PeerStorage,
-    status: &SharedStatus,
-    record: ObjectRecord,
-) -> Result<(), PeerError> {
-    let mut incoming = storage.begin_receive(&record)?;
-    status.transfer(&record.path, record.size, "正在接收");
-    status.progress(incoming.offset());
-    channel.send(&Wire::Resume(incoming.offset()))?;
-    loop {
-        match channel.receive()? {
-            Wire::Data(bytes) => {
-                incoming.write_chunk(&bytes)?;
-                let received = incoming.offset();
-                channel.send(&Wire::DataAck(received))?;
-                status.progress(received);
-            }
-            Wire::FileEnd => break,
-            _ => return Err(ProtocolError::Unexpected.into()),
-        }
-    }
-    storage.commit(incoming)?;
-    channel.send(&Wire::Applied)?;
-    Ok(())
-}
-
-fn send_reading(channel: &mut NoiseChannel, bytes: &[u8]) -> Result<(), PeerError> {
-    channel.send(&Wire::ReadingStart(bytes.len() as u64))?;
-    send_blob(channel, bytes)?;
-    channel.send(&Wire::FileEnd)?;
-    Ok(())
-}
-
-fn send_blob(channel: &mut NoiseChannel, bytes: &[u8]) -> Result<(), PeerError> {
-    let mut sent = 0_u64;
-    for chunk in bytes.chunks(CHUNK_BYTES) {
-        channel.send(&Wire::Data(chunk.to_vec()))?;
-        sent += chunk.len() as u64;
-        expect_data_ack(channel.receive()?, sent)?;
-    }
-    Ok(())
-}
-
-fn receive_blob(channel: &mut NoiseChannel, length: u64) -> Result<Vec<u8>, PeerError> {
-    let bytes = receive_data(channel, length)?;
-    match channel.receive()? {
-        Wire::FileEnd => Ok(bytes),
-        _ => Err(ProtocolError::Unexpected.into()),
-    }
-}
-
-fn receive_data(channel: &mut NoiseChannel, length: u64) -> Result<Vec<u8>, PeerError> {
-    if length > protocol::MAX_READING_BYTES as u64 {
-        return Err(ProtocolError::SnapshotTooLarge.into());
-    }
-    let mut output = Vec::with_capacity(length as usize);
-    while output.len() < length as usize {
-        match channel.receive()? {
-            Wire::Data(bytes)
-                if !bytes.is_empty() && output.len() + bytes.len() <= length as usize =>
-            {
-                output.extend(bytes);
-                channel.send(&Wire::DataAck(output.len() as u64))?;
-            }
-            _ => return Err(ProtocolError::Unexpected.into()),
-        }
-    }
-    Ok(output)
-}
-
-fn expect_applied(value: Wire) -> Result<(), PeerError> {
-    match value {
-        Wire::Applied => Ok(()),
-        Wire::Error(message) => Err(PeerError::Remote(message)),
-        _ => Err(ProtocolError::Unexpected.into()),
-    }
-}
-
-fn expect_done(value: Wire) -> Result<(), PeerError> {
-    match value {
-        Wire::Done => Ok(()),
-        _ => Err(ProtocolError::Unexpected.into()),
+        document_settings: selection.contains(SyncItem::KoreaderDocumentSettings),
     }
 }
 
