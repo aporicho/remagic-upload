@@ -1,4 +1,5 @@
 mod discovery;
+mod error;
 mod noise;
 mod protocol;
 pub(crate) mod reading;
@@ -6,23 +7,27 @@ pub(crate) mod storage;
 mod transport;
 
 pub use discovery::{DiscoveredPeer, DiscoveryService};
+pub use error::PeerError;
 pub use noise::MAGIC;
 
 use crate::catalog::{now_ms, Catalog, DeviceIdentity, ObjectRecord, TrustedPeer};
 use crate::server::SharedStatus;
 use discovery::pairing_code;
-use noise::{NoiseChannel, NoiseError};
+use noise::NoiseChannel;
 use protocol::{
     expect_data_ack, expect_hello, validate_clock, ProtocolError, Snapshot, Wire, CHUNK_BYTES,
 };
-use reading::{merge as merge_reading, ReadingError, ReadingProvider};
+use reading::{merge as merge_reading, ReadingProvider};
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use storage::{PeerStorage, StorageError};
-use thiserror::Error;
+use storage::PeerStorage;
 use transport::{configure, connect_any};
+
+const FILE_SYNC_ENV: &str = "REMAGIC_UPLOAD_SYNC_FILES";
+const FILE_SYNC_DISABLED_MESSAGE: &str = "此版本默认只同步 KOReader 阅读进度，未传输书籍文件";
 
 pub struct PeerRuntime {
     catalog: Arc<Catalog>,
@@ -92,27 +97,33 @@ impl PeerRuntime {
         send_snapshot(&mut channel, &local)?;
         let remote = receive_snapshot(&mut channel)?;
         let mut summary = SyncSummary::default();
-        for (local_record, remote_record) in PeerStorage::winners(&local.records, &remote.records) {
-            match winner(&local_record, &remote_record) {
-                Winner::Remote(record) => {
-                    if record.deleted {
-                        self.storage.apply_tombstone(record)?;
-                        summary.deleted += 1;
-                    } else {
-                        pull(&mut channel, &self.storage, &self.status, record)?;
-                        summary.received += 1;
+        if file_sync_enabled() {
+            for (local_record, remote_record) in
+                PeerStorage::winners(&local.records, &remote.records)
+            {
+                match winner(&local_record, &remote_record) {
+                    Winner::Remote(record) => {
+                        if record.deleted {
+                            self.storage.apply_tombstone(record)?;
+                            summary.deleted += 1;
+                        } else {
+                            pull(&mut channel, &self.storage, &self.status, record)?;
+                            summary.received += 1;
+                        }
                     }
-                }
-                Winner::Local(record) => {
-                    push(&mut channel, &self.storage, &self.status, record)?;
-                    if record.deleted {
-                        summary.deleted += 1;
-                    } else {
-                        summary.sent += 1;
+                    Winner::Local(record) => {
+                        push(&mut channel, &self.storage, &self.status, record)?;
+                        if record.deleted {
+                            summary.deleted += 1;
+                        } else {
+                            summary.sent += 1;
+                        }
                     }
+                    Winner::Equal => {}
                 }
-                Winner::Equal => {}
             }
+        } else if !remote.records.is_empty() {
+            self.status.message("已忽略对方书籍文件，仅同步阅读进度");
         }
         let merged = merge_reading(&local.reading, &remote.reading)?;
         send_reading(&mut channel, &merged)?;
@@ -120,10 +131,14 @@ impl PeerRuntime {
         self.reading.import(&merged)?;
         channel.send(&Wire::Done)?;
         expect_done(channel.receive()?)?;
-        self.status.message(&format!(
-            "同步完成：接收 {}，发送 {}，删除 {}",
-            summary.received, summary.sent, summary.deleted
-        ));
+        if file_sync_enabled() {
+            self.status.message(&format!(
+                "同步完成：接收 {}，发送 {}，删除 {}",
+                summary.received, summary.sent, summary.deleted
+            ));
+        } else {
+            self.status.message("阅读进度同步完成");
+        }
         Ok(summary)
     }
 
@@ -154,6 +169,10 @@ impl PeerRuntime {
     ) -> Result<(), PeerError> {
         loop {
             match channel.receive()? {
+                Wire::Get { .. } | Wire::PutStart(_) if !file_sync_enabled() => {
+                    reject_file_sync(channel)?;
+                    return Err(PeerError::FileSyncDisabled);
+                }
                 Wire::Get { kind, path } => {
                     let record = self
                         .catalog
@@ -187,7 +206,11 @@ impl PeerRuntime {
     }
 
     fn snapshot(&self) -> Result<Snapshot, PeerError> {
-        let records = self.storage.scan()?;
+        let records = if file_sync_enabled() {
+            self.storage.scan()?
+        } else {
+            Vec::new()
+        };
         let reading = self.reading.export()?;
         Ok(Snapshot { records, reading })
     }
@@ -224,6 +247,19 @@ impl PeerRuntime {
         self.status.activity(label, "正在同步");
         Ok(ActiveGuard(&self.active))
     }
+}
+
+fn file_sync_enabled() -> bool {
+    file_sync_enabled_from(std::env::var_os(FILE_SYNC_ENV))
+}
+
+fn file_sync_enabled_from(value: Option<OsString>) -> bool {
+    value.is_some()
+}
+
+fn reject_file_sync(channel: &mut NoiseChannel) -> Result<(), PeerError> {
+    channel.send(&Wire::Error(FILE_SYNC_DISABLED_MESSAGE.into()))?;
+    Ok(())
 }
 
 #[derive(Default, Debug, Eq, PartialEq)]
@@ -466,51 +502,13 @@ impl Drop for ActiveGuard<'_> {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum PeerError {
-    #[error("已有同步正在进行")]
-    Busy,
-    #[error("请在两台设备确认配对码 {0}")]
-    PairingRequired(String),
-    #[error("对端设备身份与发现记录不一致")]
-    IdentityMismatch,
-    #[error("对端没有可连接的局域网地址")]
-    NoAddress,
-    #[error("同步对象不存在")]
-    MissingObject,
-    #[error("对端拒绝同步：{0}")]
-    Remote(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Catalog(#[from] crate::catalog::CatalogError),
-    #[error(transparent)]
-    Noise(#[from] NoiseError),
-    #[error(transparent)]
-    Protocol(#[from] ProtocolError),
-    #[error(transparent)]
-    Storage(#[from] StorageError),
-    #[error(transparent)]
-    Reading(#[from] ReadingError),
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl PeerError {
-    pub fn user_message(&self) -> String {
-        let mut current: &(dyn std::error::Error + 'static) = self;
-        loop {
-            if let Some(error) = current.downcast_ref::<std::io::Error>() {
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) {
-                    return "网络传输超时；请重试，已接收部分会从断点继续".into();
-                }
-                return format!("网络连接失败：{error}");
-            }
-            let Some(source) = current.source() else {
-                return self.to_string();
-            };
-            current = source;
-        }
+    #[test]
+    fn file_sync_is_opt_in() {
+        assert!(!file_sync_enabled_from(None));
+        assert!(file_sync_enabled_from(Some(OsString::from("1"))));
     }
 }

@@ -253,7 +253,7 @@ impl AppState {
 
     fn activate_sync(&mut self) {
         if self.sync_worker.is_some() {
-            self.status.message("同步正在进行");
+            self.status.message("阅读进度同步正在进行");
             return;
         }
         let Some(peer) = self.peers.first().cloned() else {

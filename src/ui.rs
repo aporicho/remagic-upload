@@ -93,7 +93,7 @@ impl UploadUi {
         );
         self.text(
             surface,
-            "浏览器上传，或与另一台 ReMagic 设备同步",
+            "浏览器上传，或与另一台 ReMagic 设备同步阅读进度",
             margin as f32,
             margin as f32 + 75.0 * unit,
             25.0 * unit,
@@ -219,9 +219,9 @@ impl UploadUi {
         }
 
         let peer_text = match model.peer {
-            Some(peer) if model.peer_trusted => format!("同步设备：{}　已配对", peer.name),
-            Some(peer) => format!("同步设备：{}　配对码 {}", peer.name, peer.pairing_code),
-            None => "同步设备：等待局域网发现".to_owned(),
+            Some(peer) if model.peer_trusted => format!("进度同步：{}　已配对", peer.name),
+            Some(peer) => format!("进度同步：{}　配对码 {}", peer.name, peer.pairing_code),
+            None => "进度同步：等待局域网发现".to_owned(),
         };
         self.text_fit(
             surface,
@@ -307,7 +307,7 @@ impl UploadUi {
         self.text_centered(
             surface,
             if model.peer_trusted {
-                "立即同步"
+                "同步进度"
             } else {
                 "确认配对"
             },
